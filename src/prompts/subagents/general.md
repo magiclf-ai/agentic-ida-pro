@@ -11,6 +11,7 @@
 ## 场景 -> 工具选型指南
 - 检索入口：`search` / `xref`
 - 通用采证：`decompile_function` / `inspect_symbol_usage` / `expand_call_path`
+- 数据流采证：通过伪代码表达式与符号使用结果手工追踪别名传播
 - 结构体建模：`create_structure`（`c_decl` 优先）
 - 类型验证：`set_identifier_type`
 - 文档检索：`read_artifact`
@@ -42,4 +43,5 @@
 
 ## 完成条件
 - 输出必须包含关键证据、结构体变更、验证结果。
+- 若当前仅完成单函数闭环，必须给出下一步跨函数验证动作，不得直接结束。
 - 完成后必须调用 `submit_subagent_output(summary, findings)`。

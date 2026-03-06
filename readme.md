@@ -75,7 +75,7 @@ IDB / Hex-Rays / IDA APIs
 ├── frontend/observability/        # 可观测性前端 (Vue)
 ├── logs/                          # 会话日志、报告产物
 ├── runtime/                       # 运行时控制文件（如 bridge 控制文件）
-└── test_binaries/                 # 示例二进制/IDB
+└── test_binaries/                 # 示例二进制/IDB（含 suite_v2 复杂样例）
 ```
 
 ---
@@ -376,6 +376,32 @@ npm run dev -- --host 0.0.0.0 --port 5173
 - 输入输出以纯文本为主，不依赖 pydantic/json 强结构输出
 - 结构体恢复仅使用 `create_structure` 做落地建模
 - IDAPython 兼容目标固定为 IDA Pro 9.3
+
+---
+
+## 19. 复杂逆向样例（suite_v2）
+
+新增复杂数据流样例目录：
+
+```text
+test_binaries/suite_v2
+├── src/              # 6 个 C/C++ 样例源码
+├── bin/              # 编译产物（dbg + strip）
+├── Makefile
+└── README.md
+```
+
+构建（禁优化，保留跨函数逻辑）：
+
+```bash
+cd test_binaries/suite_v2
+make all
+```
+
+每个样例都会产出：
+
+- `*_dbg`（带符号）
+- `*_strip`（strip 后）
 
 ---
 

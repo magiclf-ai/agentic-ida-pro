@@ -467,36 +467,6 @@ else:
             raise Exception(f"Unexpected /xrefs payload type: {type(data).__name__}")
         raise Exception(result.get("error", "Failed to search xrefs"))
 
-    def inspect_function_deep(
-        self,
-        function_name: str,
-        include_pseudocode: bool = True,
-        max_expr_samples: int = 120,
-    ) -> Dict[str, Any]:
-        """
-        深度检查函数：伪代码、调用点、成员访问、指针解引用、局部变量、表达式样本
-
-        Args:
-            function_name: 目标函数名
-            include_pseudocode: 是否包含伪代码
-            max_expr_samples: AST 表达式样本上限
-        """
-        script = self._render_script_template(
-            "inspect_function_deep.py",
-            {
-                "FUNCTION_NAME": str(function_name),
-                "INCLUDE_PSEUDOCODE": bool(include_pseudocode),
-                "MAX_EXPR_SAMPLES": int(max_expr_samples),
-            },
-        )
-        result = self.execute_script(script=script)
-        if result.get("success"):
-            payload = result.get("result")
-            if isinstance(payload, dict):
-                return payload
-            raise Exception(f"Unexpected inspect_function_deep payload type: {type(payload).__name__}")
-        raise Exception(result.get("stderr") or result.get("error") or "Failed to inspect function")
-
     def inspect_symbol_usage(
         self,
         function_name: str,
@@ -815,33 +785,6 @@ else:
             return False
         return True
 
-    def collect_allocations(
-        self,
-        function_name: str,
-        include_pseudocode: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        收集函数中的内存分配与变量别名传播证据（malloc/calloc/new + var alias）
-
-        Args:
-            function_name: 目标函数名
-            include_pseudocode: 是否附带伪代码
-        """
-        script = self._render_script_template(
-            "collect_allocations.py",
-            {
-                "FUNCTION_NAME": function_name,
-                "INCLUDE_PSEUDOCODE": bool(include_pseudocode),
-            },
-        )
-        result = self.execute_script(script)
-        if result.get("success"):
-            payload = result.get("result")
-            if isinstance(payload, dict):
-                return payload
-            raise Exception(f"Unexpected collect_allocations payload type: {type(payload).__name__}")
-        raise Exception(result.get("stderr") or result.get("error") or "Failed to collect allocations")
-
     def expand_call_path(
         self,
         function_names: List[str],
@@ -883,118 +826,6 @@ else:
                 return payload
             raise Exception(f"Unexpected call path payload type: {type(payload).__name__}")
         raise Exception(result.get("stderr") or result.get("error") or "Failed to expand call path")
-
-    def inspect_symbol_usage_on_call_path(
-        self,
-        function_names: List[str],
-        max_depth: int = 1,
-        include_thunks: bool = False,
-        include_pseudocode: bool = False,
-        include_data_refs: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        在调用路径上批量检查参数/局部/全局符号使用
-        """
-        graph = self.expand_call_path(
-            function_names=function_names,
-            max_depth=max_depth,
-            include_thunks=include_thunks,
-        )
-        node_names = [node.get("name", "") for node in graph.get("nodes", []) if node.get("name")]
-        reports = []
-        errors = []
-        global_read_map: Dict[int, Dict[str, Any]] = {}
-        global_write_map: Dict[int, Dict[str, Any]] = {}
-
-        for func_name in node_names:
-            try:
-                report = self.inspect_symbol_usage(
-                    function_name=func_name,
-                    include_pseudocode=include_pseudocode,
-                    include_data_refs=include_data_refs,
-                )
-            except Exception as e:
-                errors.append({"function": func_name, "error": str(e)})
-                continue
-
-            reports.append(
-                {
-                    "function": func_name,
-                    "ea": report.get("ea"),
-                    "arg_count": report.get("arg_count", 0),
-                    "local_count": report.get("local_count", 0),
-                    "global_read_count": report.get("global_read_count", 0),
-                    "global_write_count": report.get("global_write_count", 0),
-                    "data_ref_count": report.get("data_ref_count", 0),
-                    "report": report,
-                }
-            )
-
-            for row in report.get("global_reads", []):
-                ea = int(row.get("ea", -1))
-                if ea < 0:
-                    continue
-                item = global_read_map.get(ea)
-                if item is None:
-                    item = {
-                        "ea": ea,
-                        "name": row.get("name", ""),
-                        "function_count": 0,
-                        "functions": [],
-                        "sample_exprs": [],
-                    }
-                    global_read_map[ea] = item
-                item["function_count"] += 1
-                item["functions"].append(func_name)
-                text = str(row.get("expr", ""))
-                if text and text not in item["sample_exprs"] and len(item["sample_exprs"]) < 4:
-                    item["sample_exprs"].append(text)
-
-            for row in report.get("global_writes", []):
-                ea = int(row.get("ea", -1))
-                if ea < 0:
-                    continue
-                item = global_write_map.get(ea)
-                if item is None:
-                    item = {
-                        "ea": ea,
-                        "name": row.get("name", ""),
-                        "function_count": 0,
-                        "functions": [],
-                        "sample_exprs": [],
-                    }
-                    global_write_map[ea] = item
-                item["function_count"] += 1
-                item["functions"].append(func_name)
-                text = str(row.get("expr", ""))
-                if text and text not in item["sample_exprs"] and len(item["sample_exprs"]) < 4:
-                    item["sample_exprs"].append(text)
-
-        global_reads = []
-        for ea in sorted(global_read_map.keys()):
-            row = global_read_map[ea]
-            row["functions"] = sorted(set(row.get("functions", [])))
-            global_reads.append(row)
-
-        global_writes = []
-        for ea in sorted(global_write_map.keys()):
-            row = global_write_map[ea]
-            row["functions"] = sorted(set(row.get("functions", [])))
-            global_writes.append(row)
-
-        return {
-            "entries": graph.get("entries", []),
-            "max_depth": graph.get("max_depth", max_depth),
-            "include_thunks": graph.get("include_thunks", include_thunks),
-            "scanned_function_count": len(node_names),
-            "report_count": len(reports),
-            "error_count": len(errors),
-            "errors": errors,
-            "reports": reports,
-            "global_reads": global_reads,
-            "global_writes": global_writes,
-            "call_path": graph,
-        }
 
     def close(self):
         """关闭会话"""

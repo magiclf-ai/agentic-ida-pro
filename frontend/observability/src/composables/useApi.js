@@ -26,23 +26,27 @@ export function useSessionDetail(sessionId) {
   const turns = ref([])
   const messages = ref([])
   const turnTools = ref([])
+  const executedToolCalls = ref([])
   const loading = ref(false)
   
   async function fetchAll() {
     if (!sessionId.value) return
     loading.value = true
     try {
-      const [turnsRes, messagesRes, turnToolsRes] = await Promise.all([
+      const [turnsRes, messagesRes, turnToolsRes, executedToolsRes] = await Promise.all([
         fetch(`${API_BASE}/api/turns?session_id=${sessionId.value}`),
         fetch(`${API_BASE}/api/messages?session_id=${sessionId.value}`),
-        fetch(`${API_BASE}/api/turn_tools?session_id=${sessionId.value}`)
+        fetch(`${API_BASE}/api/turn_tools?session_id=${sessionId.value}`),
+        fetch(`${API_BASE}/api/executed_tool_calls?session_id=${sessionId.value}`)
       ])
       const turnsData = await turnsRes.json()
       const messagesData = await messagesRes.json()
       const turnToolsData = await turnToolsRes.json()
+      const executedToolsData = await executedToolsRes.json()
       turns.value = turnsData.turns || []
       messages.value = messagesData.messages || []
       turnTools.value = turnToolsData.turn_tools || []
+      executedToolCalls.value = executedToolsData.executed_tool_calls || []
     } catch (e) {
       console.error('Failed to fetch session:', e)
     } finally {
@@ -95,6 +99,15 @@ export function useSessionDetail(sessionId) {
       toolsByTurn[turnId].push(tool)
     })
 
+    const executedToolsByTurn = {}
+    executedToolCalls.value.forEach(tool => {
+      const turnId = tool.turn_id || 'unknown'
+      if (!executedToolsByTurn[turnId]) {
+        executedToolsByTurn[turnId] = []
+      }
+      executedToolsByTurn[turnId].push(tool)
+    })
+
     // Attach messages and tools to each turn, extract task summary
     return turns.value.map(turn => {
       const turnMessages = messagesByTurn[turn.turn_id] || []
@@ -105,6 +118,7 @@ export function useSessionDetail(sessionId) {
         ...turn,
         messages: turnMessages,
         bound_tools: toolsByTurn[turn.turn_id] || [],
+        executed_tool_calls: executedToolsByTurn[turn.turn_id] || [],
         task_summary: taskSummary
       }
     })
@@ -114,6 +128,7 @@ export function useSessionDetail(sessionId) {
     turns,
     messages,
     turnTools,
+    executedToolCalls,
     turnsWithMessages,
     loading,
     fetchAll

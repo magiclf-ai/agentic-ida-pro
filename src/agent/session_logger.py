@@ -104,6 +104,25 @@ class AgentSessionLogger:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_turn_tools_session ON turn_tools(session_id, turn_id)")
 
+        # Store tool calls actually executed in each turn.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS executed_tool_calls (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              tool_call_id TEXT DEFAULT '',
+              tool_name TEXT NOT NULL,
+              is_error INTEGER DEFAULT 0,
+              mutation_effective INTEGER,
+              duration_ms INTEGER DEFAULT 0,
+              result_preview TEXT DEFAULT '',
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exec_tools_session ON executed_tool_calls(session_id, turn_id, id)")
+
         # Insert session
         now = _utc_now_iso()
         cur.execute(
@@ -197,6 +216,49 @@ class AgentSessionLogger:
             )
         self._db.commit()
 
+    def _log_executed_tool_calls(self, turn_id: str, tool_calls: list) -> None:
+        """Log actually executed tool calls for a turn."""
+        if not tool_calls:
+            return
+        now = _utc_now_iso()
+        for row in tool_calls:
+            if not isinstance(row, dict):
+                continue
+            tool_name = str(row.get("tool_name", "") or "").strip()
+            if not tool_name:
+                continue
+            mutation_effective = row.get("mutation_effective")
+            mutation_value = None
+            if mutation_effective is True:
+                mutation_value = 1
+            elif mutation_effective is False:
+                mutation_value = 0
+            self._db.execute(
+                """
+                INSERT INTO executed_tool_calls(
+                  session_id, turn_id, tool_call_id, tool_name, is_error,
+                  mutation_effective, duration_ms, result_preview, created_at
+                )
+                VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    self.session_id,
+                    turn_id,
+                    str(row.get("tool_call_id", "") or ""),
+                    tool_name,
+                    1 if bool(row.get("is_error", False)) else 0,
+                    mutation_value,
+                    int(row.get("duration_ms", 0) or 0),
+                    str(row.get("result_preview", "") or "")[:2000],
+                    now,
+                ),
+            )
+        self._db.execute(
+            "UPDATE sessions SET updated_at=? WHERE session_id=?",
+            (now, self.session_id),
+        )
+        self._db.commit()
+
     def log(self, event: str, payload: Dict[str, Any]) -> None:
         with self._lock:
             turn_id = payload.get("turn_id", "")
@@ -259,6 +321,11 @@ class AgentSessionLogger:
             elif event == "tools_bound":
                 tools = payload.get("tools", [])
                 self._log_bound_tools(turn_id, tools)
+
+            elif event == "tool_batch_executed":
+                tool_calls = payload.get("tool_calls", [])
+                self._ensure_turn(turn_id, agent_id, agent_name, iteration, phase or "", "running")
+                self._log_executed_tool_calls(turn_id, tool_calls if isinstance(tool_calls, list) else [])
 
     def close(self) -> None:
         try:

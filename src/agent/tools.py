@@ -292,7 +292,7 @@ def run_ida_script_template(
     执行 src/ida_scripts 中的模板脚本（可做 __TOKEN__ 替换 + context 注入）
 
     Args:
-        template_name: 模板文件名（相对 src/ida_scripts，例如 collect_allocations.py）
+        template_name: 模板文件名（相对 src/ida_scripts，例如 inspect_symbol_usage.py）
         variables: 替换模板中的 __TOKEN__ 变量
         context: 运行时注入脚本命名空间的变量
 
@@ -578,56 +578,6 @@ def xref(
 
 
 @tool(parse_docstring=True, error_on_invalid_docstring=True)
-def inspect_function_deep(
-    function_name: str,
-    include_pseudocode: bool = True,
-    max_expr_samples: int = 120,
-) -> str:
-    """
-    深度检查函数：伪代码 + AST 表达式样本 + 调用点 + 成员访问 + 局部变量
-
-    Args:
-        function_name: 目标函数名
-        include_pseudocode: 是否包含伪代码
-        max_expr_samples: AST 样本数量上限
-
-    Returns:
-        深度检查报告
-    """
-    client = get_ida_client()
-    try:
-        data = client.inspect_function_deep(
-            function_name=function_name,
-            include_pseudocode=include_pseudocode,
-            max_expr_samples=max_expr_samples,
-        )
-        lines = [
-            f"Function deep inspection: {function_name}",
-            f"  ea=0x{int(data.get('ea', 0)):x}",
-            f"  call_count={data.get('call_count', 0)}",
-            f"  member_access_count={data.get('member_access_count', 0)}",
-            f"  pointer_deref_count={data.get('pointer_deref_count', 0)}",
-            f"  lvar_count={data.get('lvar_count', 0)}",
-            f"  xrefs_to_count={data.get('xrefs_to_count', 0)}",
-            "Top call sites:",
-        ]
-        for row in (data.get("calls", []) or [])[:20]:
-            lines.append(
-                "  "
-                f"ea=0x{int(row.get('ea', 0)):x}, "
-                f"callee={row.get('callee', '')}, "
-                f"arg_count={row.get('arg_count', 0)}, "
-                f"expr={row.get('expr_text', '')}"
-            )
-        if len(data.get("calls", []) or []) > 20:
-            lines.append(f"  ... and {len(data.get('calls', []) or []) - 20} more call sites")
-        _append_structured_section(lines, "Evidence:", data, max_items=20)
-        return "\n".join(lines)
-    except Exception as e:
-        return f"ERROR: inspecting function deeply failed: {str(e)}"
-
-
-@tool(parse_docstring=True, error_on_invalid_docstring=True)
 def set_identifier_type(
     function_name: str,
     kind: str = "",
@@ -833,66 +783,6 @@ def get_database_info() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"ERROR: getting database info failed: {str(e)}"
-
-
-@tool(parse_docstring=True, error_on_invalid_docstring=True)
-def collect_allocations(function_name: str, include_pseudocode: bool = False) -> str:
-    """
-    收集函数中的内存分配与变量别名传播证据（malloc/calloc/new + alias）
-
-    Args:
-        function_name: 目标函数名
-        include_pseudocode: 是否附带伪代码
-
-    Returns:
-        分配与别名报告
-    """
-    client = get_ida_client()
-    try:
-        report = client.collect_allocations(
-            function_name=function_name,
-            include_pseudocode=include_pseudocode,
-        )
-        if isinstance(report, dict) and report.get("error"):
-            return f"ERROR: collecting allocations failed: {report['error']}"
-
-        allocs = report.get("allocations", []) if isinstance(report, dict) else []
-        aliases = report.get("aliases", []) if isinstance(report, dict) else []
-        lines = [
-            f"Allocation report for '{function_name}':",
-            f"  allocation_count={len(allocs)}",
-            f"  alias_count={len(aliases)}",
-        ]
-        if allocs:
-            lines.append("Allocations:")
-            for row in allocs[:30]:
-                lines.append(
-                    "  "
-                    f"lhs={row.get('lhs', '')}, "
-                    f"kind={row.get('alloc_kind', '')}, "
-                    f"size_bytes={row.get('size_bytes')}, "
-                    f"count={row.get('count')}, "
-                    f"elem_size={row.get('elem_size')}, "
-                    f"call={row.get('call_name', '')}, "
-                    f"expr={row.get('expr_text', '')}"
-                )
-            if len(allocs) > 30:
-                lines.append(f"  ... and {len(allocs) - 30} more allocations")
-        if aliases:
-            lines.append("Aliases (top 50):")
-            for row in aliases[:50]:
-                lines.append(
-                    "  "
-                    f"dst={row.get('dst', '')}, "
-                    f"src={row.get('src', '')}, "
-                    f"expr={row.get('expr_text', '')}"
-                )
-            if len(aliases) > 50:
-                lines.append(f"  ... and {len(aliases) - 50} more aliases")
-        _append_structured_section(lines, "Evidence:", report, max_items=24)
-        return "\n".join(lines)
-    except Exception as e:
-        return f"ERROR: collecting allocations failed: {str(e)}"
 
 
 @tool(parse_docstring=True, error_on_invalid_docstring=True)
@@ -1344,79 +1234,6 @@ def expand_call_path(
         return f"ERROR: expanding call path failed: {str(e)}"
 
 
-@tool(parse_docstring=True, error_on_invalid_docstring=True)
-def inspect_symbol_usage_on_call_path(
-    function_names: List[str],
-    max_depth: int = 1,
-    include_thunks: bool = False,
-    include_pseudocode: bool = False,
-    include_data_refs: bool = True,
-) -> str:
-    """
-    在调用路径上批量检查参数/局部/全局符号使用
-
-    Args:
-        function_names: 入口函数名列表
-        max_depth: 调用深度
-        include_thunks: 是否包含 thunk/lib 函数
-        include_pseudocode: 是否附带伪代码
-        include_data_refs: 是否附带指令级数据引用
-
-    Returns:
-        调用路径符号使用报告
-    """
-    client = get_ida_client()
-    try:
-        names = _normalize_function_names(function_names)
-        data = client.inspect_symbol_usage_on_call_path(
-            function_names=names,
-            max_depth=max_depth,
-            include_thunks=include_thunks,
-            include_pseudocode=include_pseudocode,
-            include_data_refs=include_data_refs,
-        )
-        reports = data.get("reports", [])
-        lines = [
-            f"Symbol usage on call path entries={names}",
-            f"  max_depth={data.get('max_depth', max_depth)}",
-            f"  include_thunks={data.get('include_thunks', include_thunks)}",
-            f"  scanned_function_count={data.get('scanned_function_count', 0)}",
-            f"  report_count={len(reports)}",
-            f"  error_count={data.get('error_count', 0)}",
-            "Per-function (top 60):",
-        ]
-        for row in reports[:60]:
-            lines.append(
-                "  "
-                f"function={row.get('function', '')}, "
-                f"args={row.get('arg_count', 0)}, "
-                f"locals={row.get('local_count', 0)}, "
-                f"global_reads={row.get('global_read_count', 0)}, "
-                f"global_writes={row.get('global_write_count', 0)}, "
-                f"data_refs={row.get('data_ref_count', 0)}"
-            )
-        if len(reports) > 60:
-            lines.append(f"  ... and {len(reports) - 60} more functions")
-        lines.append("Global reads summary (top 40):")
-        for row in (data.get("global_reads", []) or [])[:40]:
-                lines.append(
-                    "  "
-                    f"ea=0x{int(row.get('ea', 0)):x}, name={row.get('name', '')}, "
-                    f"function_count={row.get('function_count', 0)}, functions={','.join([str(x) for x in (row.get('functions', []) or [])])}"
-                )
-        lines.append("Global writes summary (top 40):")
-        for row in (data.get("global_writes", []) or [])[:40]:
-                lines.append(
-                    "  "
-                    f"ea=0x{int(row.get('ea', 0)):x}, name={row.get('name', '')}, "
-                    f"function_count={row.get('function_count', 0)}, functions={','.join([str(x) for x in (row.get('functions', []) or [])])}"
-                )
-        _append_structured_section(lines, "Evidence:", data, max_items=24)
-        return "\n".join(lines)
-    except Exception as e:
-        return f"ERROR: inspecting symbol usage on call path failed: {str(e)}"
-
-
 # 默认导出：最小闭环工具集（分析 -> 建模 -> 应用类型 -> 验证）
 CORE_TOOLS = [
     execute_idapython,
@@ -1436,14 +1253,11 @@ OPTIONAL_TOOLS = [
     run_ida_script_template,
     get_function_info,
     list_all_functions,
-    inspect_function_deep,
     get_xrefs_to,
     get_xrefs_from,
     get_database_info,
     list_skill_templates,
     run_skill_template,
-    collect_allocations,
-    inspect_symbol_usage_on_call_path,
 ]
 
 

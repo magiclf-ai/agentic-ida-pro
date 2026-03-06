@@ -2027,7 +2027,6 @@ class ReverseExpertAgentCore:
                 parent_agent_id=parent_agent_id,
                 turn_id=turn_id,
             )
-            interaction_start = len(messages)
             if str(compression_prompt or "").strip():
                 self.policy_mgr.append_message(
                     messages=messages,
@@ -2214,6 +2213,17 @@ class ReverseExpertAgentCore:
                 "error_count": len([row for row in outputs if bool(row.get("is_error", False))]),
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "durations_ms": [int(row.get("duration_ms", 0)) for row in outputs],
+                "tool_calls": [
+                    {
+                        "tool_call_id": str(row.get("tool_call_id", "") or ""),
+                        "tool_name": str(row.get("tool_name", "") or ""),
+                        "is_error": bool(row.get("is_error", False)),
+                        "mutation_effective": row.get("mutation_effective"),
+                        "duration_ms": int(row.get("duration_ms", 0) or 0),
+                        "result_preview": AgentUtils.truncate(str(row.get("result", "") or ""), 600),
+                    }
+                    for row in outputs
+                ],
                 "policy_id": self.policy_id,
                 "git_commit": self.git_commit,
                 "loop_mode": self.loop_mode,
@@ -2369,7 +2379,6 @@ class ReverseExpertAgentCore:
                 parent_agent_id=parent_agent_id,
                 turn_id=turn_id,
             )
-            interaction_start = len(messages)
             if str(compression_prompt or "").strip():
                 self.policy_mgr.append_message(
                     messages=messages,
@@ -2410,7 +2419,7 @@ class ReverseExpertAgentCore:
                     {
                         "turn_id": turn_id,
                         "error": str(e),
-                        "messages": self._serialize_messages_for_log(messages[interaction_start:]),
+                        "messages": self._serialize_messages_for_log(messages),
                     },
                 )
                 raise

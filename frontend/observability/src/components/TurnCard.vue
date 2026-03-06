@@ -14,6 +14,7 @@ const props = defineProps({
 const expanded = ref(props.defaultExpanded)
 const copied = ref(false)
 const toolsExpanded = ref(false)
+const executedToolsExpanded = ref(false)
 
 const roleLabels = {
   assistant: '🤖 AI',
@@ -86,10 +87,12 @@ const boundTools = computed(() => {
   return props.turn.bound_tools || []
 })
 
-const boundToolNames = computed(() => {
-  const tools = boundTools.value
-  if (!tools.length) return ''
-  return tools.map(t => t.tool_name).join(', ')
+const executedToolCalls = computed(() => {
+  return props.turn.executed_tool_calls || []
+})
+
+const executedToolErrorCount = computed(() => {
+  return executedToolCalls.value.filter(t => t.is_error).length
 })
 </script>
 
@@ -167,6 +170,33 @@ const boundToolNames = computed(() => {
           <span v-for="tool in boundTools" :key="tool.id" class="tool-badge" :title="tool.tool_description">
             {{ tool.tool_name }}
           </span>
+        </div>
+      </div>
+
+      <!-- Executed Tool Calls Section -->
+      <div v-if="executedToolCalls.length" class="executed-tools-section">
+        <div class="executed-tools-header" @click.stop="executedToolsExpanded = !executedToolsExpanded">
+          <span class="section-title executed">
+            <Wrench class="section-icon" />
+            Executed Calls ({{ executedToolCalls.length }})
+            <span v-if="executedToolErrorCount" class="error-count">{{ executedToolErrorCount }} errors</span>
+          </span>
+          <component :is="executedToolsExpanded ? ChevronUp : ChevronDown" class="section-expand-icon" />
+        </div>
+        <div v-if="executedToolsExpanded" class="executed-tools-list">
+          <div
+            v-for="toolCall in executedToolCalls"
+            :key="toolCall.id"
+            class="executed-tool-row"
+            :class="{ 'is-error': toolCall.is_error }"
+            :title="toolCall.result_preview"
+          >
+            <span class="executed-tool-name">{{ toolCall.tool_name }}</span>
+            <span v-if="toolCall.mutation_effective === true" class="exec-chip mutation">mutation</span>
+            <span v-if="toolCall.mutation_effective === false" class="exec-chip">no-op</span>
+            <span class="exec-chip">{{ toolCall.duration_ms }}ms</span>
+            <span v-if="toolCall.is_error" class="exec-chip error">error</span>
+          </div>
         </div>
       </div>
       
@@ -440,6 +470,16 @@ const boundToolNames = computed(() => {
   background: #0c1d2b;
 }
 
+.executed-tools-section {
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.is-dark .executed-tools-section {
+  border-bottom-color: #30363d;
+  background: #161f2a;
+}
+
 .bound-tools-header {
   display: flex;
   align-items: center;
@@ -508,5 +548,99 @@ const boundToolNames = computed(() => {
   color: #38bdf8;
   background: rgba(56, 189, 248, 0.15);
   border-color: rgba(56, 189, 248, 0.3);
+}
+
+.executed-tools-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.executed-tools-header:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.is-dark .executed-tools-header:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.section-title.executed {
+  color: #0f766e;
+}
+
+.is-dark .section-title.executed {
+  color: #2dd4bf;
+}
+
+.error-count {
+  margin-left: 6px;
+  font-size: 10px;
+  color: #ef4444;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.executed-tools-list {
+  padding: 0 16px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.executed-tool-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+  font-size: 11px;
+}
+
+.executed-tool-row.is-error {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+  color: #b91c1c;
+}
+
+.is-dark .executed-tool-row {
+  border-color: rgba(45, 212, 191, 0.35);
+  background: rgba(45, 212, 191, 0.15);
+  color: #2dd4bf;
+}
+
+.is-dark .executed-tool-row.is-error {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.2);
+  color: #fca5a5;
+}
+
+.executed-tool-name {
+  font-weight: 600;
+}
+
+.exec-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.is-dark .exec-chip {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.exec-chip.mutation {
+  color: #047857;
+}
+
+.exec-chip.error {
+  color: #b91c1c;
 }
 </style>

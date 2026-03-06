@@ -8,7 +8,7 @@ import { useSessions, useSessionDetail } from './composables/useApi.js'
 const { sessions, loading: sessionsLoading, fetchSessions } = useSessions()
 const selectedSessionId = ref('')
 const isDark = ref(false)
-const autoRefresh = ref(false)
+const autoRefresh = ref(true)
 let refreshInterval = null
 
 const { turnsWithMessages, loading, fetchAll } = useSessionDetail(selectedSessionId)
@@ -64,6 +64,13 @@ onMounted(() => {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
   isDark.value = prefersDark
   document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light')
+  
+  // 启动自动刷新
+  if (autoRefresh.value) {
+    refreshInterval = setInterval(() => {
+      refreshNow()
+    }, 5000)
+  }
 })
 
 onUnmounted(() => {

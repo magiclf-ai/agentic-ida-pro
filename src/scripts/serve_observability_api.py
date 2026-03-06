@@ -146,6 +146,42 @@ def _fetch_turn_tools(conn: sqlite3.Connection, session_id: str) -> List[Dict[st
     ]
 
 
+def _fetch_executed_tool_calls(conn: sqlite3.Connection, session_id: str) -> List[Dict[str, Any]]:
+    """Fetch tool calls actually executed for each turn."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id, turn_id, tool_call_id, tool_name, is_error,
+                mutation_effective, duration_ms, result_preview, created_at
+            FROM executed_tool_calls
+            WHERE session_id = ?
+            ORDER BY id ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return []
+        raise
+    return [
+        {
+            "id": int(row["id"]),
+            "turn_id": str(row["turn_id"] or ""),
+            "tool_call_id": str(row["tool_call_id"] or ""),
+            "tool_name": str(row["tool_name"] or ""),
+            "is_error": bool(row["is_error"]),
+            "mutation_effective": None
+            if row["mutation_effective"] is None
+            else bool(row["mutation_effective"]),
+            "duration_ms": int(row["duration_ms"] or 0),
+            "result_preview": str(row["result_preview"] or ""),
+            "created_at": str(row["created_at"] or ""),
+        }
+        for row in rows
+    ]
+
+
 def create_app(db_path: str) -> Flask:
     app = Flask(__name__)
     app.config["OBS_DB_PATH"] = str(db_path)
@@ -203,6 +239,18 @@ def create_app(db_path: str) -> Flask:
             with _connect(app.config["OBS_DB_PATH"]) as conn:
                 rows = _fetch_turn_tools(conn, session_id)
             return jsonify({"session_id": session_id, "turn_tools": rows})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/executed_tool_calls", methods=["GET"])
+    def executed_tool_calls():
+        session_id = str(request.args.get("session_id", "")).strip()
+        if not session_id:
+            return jsonify({"error": "missing session_id"}), 400
+        try:
+            with _connect(app.config["OBS_DB_PATH"]) as conn:
+                rows = _fetch_executed_tool_calls(conn, session_id)
+            return jsonify({"session_id": session_id, "executed_tool_calls": rows})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
