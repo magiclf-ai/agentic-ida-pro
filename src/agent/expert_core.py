@@ -5,10 +5,8 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,81 +15,19 @@ from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
 
 from .context_distiller import ContextDistillerAgent
+from .context_manager import ContextManager
 from .ida_client import IDAClient
 from .idapython_kb import read_file_with_lineno, resolve_kb_root, search_regex
+from .knowledge_manager import KnowledgeManager
+from .models import ContextMessageRow, PolicyMessageRef, SubAgentState, WorkingKnowledge
+from .observability import ObservabilityHub
+from .policy_manager import PolicyManager
 from .prompt_manager import PromptManager
 from .session_logger import AgentSessionLogger
+from .subagent_manager import SubAgentManager
 from .task_board import TaskBoard
 from .tools import full_tools as all_registered_tools, set_ida_client, tools as registered_tools
-
-
-@dataclass
-class WorkingKnowledge:
-    confirmed_facts: List[str] = field(default_factory=list)
-    hypotheses: List[str] = field(default_factory=list)
-    open_questions: List[str] = field(default_factory=list)
-    do_not_repeat: List[str] = field(default_factory=list)
-    next_actions: List[str] = field(default_factory=list)
-    evidence: List[str] = field(default_factory=list)
-
-
-@dataclass
-class ContextMessageRow:
-    message_id: str
-    role: str
-    source: str
-    content: str
-    turn_id: str
-    agent_id: str
-    created_at: float
-    pinned: bool = False
-    pruned: bool = False
-    folded: bool = False
-
-
-@dataclass
-class PolicyMessageRef:
-    message_id: str
-    role: str
-    turn_id: str
-    created_at: float
-    message_obj: Any
-    protected: bool = False
-    folded: bool = False
-    active: bool = True
-
-
-@dataclass
-class SubAgentState:
-    agent_id: str
-    parent_agent_id: str
-    profile: str
-    priority: str
-    task_md: str
-    context_md: str
-    status: str = "running"
-    created_at: float = 0.0
-    updated_at: float = 0.0
-    result_md: str = ""
-    error_text: str = ""
-    delivered_to_parent: bool = False
-
-
-class ObservabilityHub:
-    """Centralized observability emitter."""
-
-    def __init__(self, logger: Optional[AgentSessionLogger], debug_enabled: bool = False):
-        self.logger = logger
-        self.debug_enabled = bool(debug_enabled)
-
-    def emit(self, event: str, payload: Dict[str, Any], *, level: str = "info") -> None:
-        if level == "debug" and (not self.debug_enabled):
-            return
-        if self.logger:
-            try:
-                self.logger.log(event, payload)
-            except Exception:
-                pass
+from .utils import AgentUtils
 
 
 class ReverseExpertAgentCore:
@@ -193,17 +129,15 @@ class ReverseExpertAgentCore:
 
         self.policy_id = "llm_driven_v1"
         self.loop_mode = "single_policy_loop"
-        self.git_commit = self._git_commit()
+        self.git_commit = AgentUtils.git_commit()
 
-        self._subagents: Dict[str, SubAgentState] = {}
+        # Initialize managers
+        self.knowledge_mgr = KnowledgeManager()
+        self.policy_mgr = PolicyManager(context_fold_placeholder=self.context_fold_placeholder)
+        self.context_mgr = ContextManager(context_window_messages=self.context_window_messages)
+        self.subagent_mgr = SubAgentManager(obs=self.obs)
         self.task_board = TaskBoard(agent_id="main")
-        self._context_messages: List[ContextMessageRow] = []
-        self._context_seq: int = 0
-        self._policy_messages_by_id: Dict[str, PolicyMessageRef] = {}
-        self._policy_message_order: List[str] = []
-        self._policy_message_obj_to_id: Dict[int, str] = {}
-        self._policy_seq: int = 0
-        self._working_knowledge = WorkingKnowledge()
+
         self._subagent_sem: Optional[asyncio.Semaphore] = None
         self._context_compress_requested: bool = False
         self._context_compress_reason: str = ""
@@ -217,13 +151,6 @@ class ReverseExpertAgentCore:
         self._effective_mutation_count: int = 0
         self._effective_type_application_count: int = 0
 
-    @staticmethod
-    def _git_commit() -> str:
-        try:
-            out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL)
-            return out.decode("utf-8", errors="ignore").strip() or "unknown"
-        except Exception:
-            return "unknown"
 
     def _debug_enabled(self) -> bool:
         value = str(os.getenv("AGENT_DEBUG", os.getenv("AGENT_DEBUG_TRACE", "0"))).strip().lower()
@@ -242,66 +169,22 @@ class ReverseExpertAgentCore:
         self.session_db_path = self.session_logger.db_path
         self.obs = ObservabilityHub(self.session_logger, debug_enabled=self._debug_enabled())
 
-    @staticmethod
-    def _content_to_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            out: List[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    if "text" in item:
-                        out.append(str(item.get("text", "")))
-                    elif item.get("type") == "text":
-                        out.append(str(item.get("text", "")))
-                    else:
-                        out.append(json.dumps(item, ensure_ascii=False, default=str))
-                else:
-                    out.append(str(item))
-            return "\n".join(out)
-        if isinstance(content, dict):
-            return json.dumps(content, ensure_ascii=False, default=str)
-        return str(content or "")
-
-    def _truncate(self, text: Any, max_chars: int) -> str:
-        value = self._content_to_text(text)
-        if len(value) <= int(max_chars):
-            return value
-        return value[: int(max_chars)] + f"... [truncated {len(value) - int(max_chars)} chars]"
-
-    @staticmethod
-    def _has_runtime_error_marker(text: Any) -> bool:
-        value = str(text or "")
-        return "[ERROR]" in value or "Traceback (most recent call last):" in value
-
-    @staticmethod
-    def _find_destructive_struct_ops(script: str) -> List[str]:
-        text = str(script or "").lower()
-        patterns = [
-            "idc.del_struc(",
-            "del_struc(",
-        ]
-        hits: List[str] = []
-        for pattern in patterns:
-            if pattern in text:
-                hits.append(pattern.rstrip("("))
-        return sorted(set(hits))
 
     def _render_idapython_execution_output(self, result: Dict[str, Any]) -> tuple[str, bool]:
         success = bool(result.get("success", False))
         stdout = str(result.get("stdout") or "")
         stderr = str(result.get("stderr") or result.get("error") or "")
         execution_time = float(result.get("execution_time", 0) or 0)
-        runtime_error = self._has_runtime_error_marker(stdout) or self._has_runtime_error_marker(stderr)
+        runtime_error = AgentUtils.has_runtime_error_marker(stdout) or AgentUtils.has_runtime_error_marker(stderr)
         if success and (not runtime_error):
             lines = [
                 "OK: execute_idapython",
                 f"Execution time: {execution_time:.3f}s",
             ]
             if result.get("result") is not None:
-                lines.append(f"Result: {self._truncate(str(result.get('result')), 2400)}")
+                lines.append(f"Result: {AgentUtils.truncate(str(result.get('result')), 2400)}")
             if stdout.strip():
-                lines.append(f"Stdout:\n{self._truncate(stdout, 3200)}")
+                lines.append(f"Stdout:\n{AgentUtils.truncate(stdout, 3200)}")
             return "\n".join(lines), True
 
         lines = [
@@ -309,9 +192,9 @@ class ReverseExpertAgentCore:
             f"Execution time: {execution_time:.3f}s",
         ]
         if stderr.strip():
-            lines.append(f"Stderr:\n{self._truncate(stderr, 3200)}")
+            lines.append(f"Stderr:\n{AgentUtils.truncate(stderr, 3200)}")
         elif stdout.strip():
-            lines.append(f"Stdout:\n{self._truncate(stdout, 3200)}")
+            lines.append(f"Stdout:\n{AgentUtils.truncate(stdout, 3200)}")
         else:
             lines.append("Stderr:\nunknown runtime error")
         return "\n".join(lines), False
@@ -377,16 +260,12 @@ class ReverseExpertAgentCore:
         return [execute_tool]
 
     def _reset_runtime_state(self) -> None:
-        self._subagents = {}
+        self.knowledge_mgr.reset()
+        self.policy_mgr.reset()
+        self.context_mgr.reset()
+        self.subagent_mgr.reset()
         self.task_board.reset()
         self.task_board.set_on_change(None)
-        self._context_messages = []
-        self._context_seq = 0
-        self._policy_messages_by_id = {}
-        self._policy_message_order = []
-        self._policy_message_obj_to_id = {}
-        self._policy_seq = 0
-        self._working_knowledge = WorkingKnowledge()
         self._subagent_sem = asyncio.Semaphore(self.subagent_max_parallel)
         self._context_compress_requested = False
         self._context_compress_reason = ""
@@ -422,7 +301,7 @@ class ReverseExpertAgentCore:
             pruned=False,
             folded=False,
         )
-        self._context_messages.append(row)
+        self.context_mgr._context_messages.append(row)
         return row
 
     def _next_policy_message_id(self) -> str:
@@ -431,7 +310,7 @@ class ReverseExpertAgentCore:
 
     def _inject_message_id_text(self, content: Any, message_id: str) -> str:
         prefix = f"消息ID: {str(message_id or '').strip()}"
-        text = self._content_to_text(content)
+        text = AgentUtils.content_to_text(content)
         if text.startswith(prefix):
             return text
         lines = text.splitlines()
@@ -451,8 +330,8 @@ class ReverseExpertAgentCore:
         turn_id: str,
         protected: bool = False,
     ) -> Any:
-        message_id = self._next_policy_message_id()
-        content_text = self._inject_message_id_text(getattr(message_obj, "content", ""), message_id)
+        message_id = self.policy_mgr.next_message_id()
+        content_text = self.policy_mgr.inject_message_id_text(getattr(message_obj, "content", ""), message_id)
         if isinstance(message_obj, SystemMessage):
             final_obj: Any = SystemMessage(content=content_text)
         elif isinstance(message_obj, HumanMessage):
@@ -474,32 +353,32 @@ class ReverseExpertAgentCore:
             folded=False,
             active=True,
         )
-        self._policy_messages_by_id[message_id] = ref
-        self._policy_message_order.append(message_id)
-        self._policy_message_obj_to_id[id(final_obj)] = message_id
+        self.policy_mgr._policy_messages_by_id[message_id] = ref
+        self.policy_mgr._policy_message_order.append(message_id)
+        self.policy_mgr._policy_message_obj_to_id[id(final_obj)] = message_id
         return final_obj
 
     def _message_id_of_obj(self, message_obj: Any) -> str:
         if message_obj is None:
             return ""
-        mapped = self._policy_message_obj_to_id.get(id(message_obj), "")
+        mapped = self.policy_mgr._policy_message_obj_to_id.get(id(message_obj), "")
         if mapped:
             return mapped
-        content_text = self._content_to_text(getattr(message_obj, "content", ""))
-        picked = self._extract_message_ids(content_text)
+        content_text = AgentUtils.content_to_text(getattr(message_obj, "content", ""))
+        picked = PolicyManager._extract_message_ids(content_text)
         return picked[0] if picked else ""
 
     def _refresh_policy_message_active_flags(self, messages: List[Any]) -> None:
         active_ids = set()
         for msg in messages:
-            mid = self._message_id_of_obj(msg)
+            mid = self.policy_mgr.message_id_of_obj(msg)
             if mid:
                 active_ids.add(mid)
-        for message_id, ref in self._policy_messages_by_id.items():
+        for message_id, ref in self.policy_mgr._policy_messages_by_id.items():
             ref.active = message_id in active_ids
 
     def _fold_policy_message(self, message_id: str, reason: str = "") -> str:
-        ref = self._policy_messages_by_id.get(str(message_id or "").strip())
+        ref = self.policy_mgr._policy_messages_by_id.get(str(message_id or "").strip())
         if not ref:
             return "unmatched"
         if not ref.active:
@@ -509,7 +388,7 @@ class ReverseExpertAgentCore:
         if ref.folded:
             return "already_folded"
         try:
-            ref.message_obj.content = self._inject_message_id_text(self.context_fold_placeholder, ref.message_id)
+            ref.message_obj.content = self.policy_mgr.inject_message_id_text(self.context_fold_placeholder, ref.message_id)
             if isinstance(ref.message_obj, AIMessage):
                 ref.message_obj.tool_calls = []
             ref.folded = True
@@ -519,8 +398,8 @@ class ReverseExpertAgentCore:
 
     def _active_policy_refs(self) -> List[PolicyMessageRef]:
         rows: List[PolicyMessageRef] = []
-        for mid in self._policy_message_order:
-            ref = self._policy_messages_by_id.get(mid)
+        for mid in self.policy_mgr._policy_message_order:
+            ref = self.policy_mgr._policy_messages_by_id.get(mid)
             if not ref:
                 continue
             if not ref.active:
@@ -533,7 +412,7 @@ class ReverseExpertAgentCore:
         if not parent_id:
             return []
         rows: List[SubAgentState] = []
-        for state in self._subagents.values():
+        for state in self.subagent_mgr._subagents.values():
             if state.parent_agent_id != parent_id:
                 continue
             if state.status == "running":
@@ -545,7 +424,7 @@ class ReverseExpertAgentCore:
         if not parent_id:
             return ""
         delivered: List[SubAgentState] = []
-        for state in self._subagents.values():
+        for state in self.subagent_mgr._subagents.values():
             if state.parent_agent_id != parent_id:
                 continue
             if state.status == "running":
@@ -563,8 +442,8 @@ class ReverseExpertAgentCore:
                     "status": state.status,
                     "profile": state.profile,
                     "priority": state.priority,
-                    "task_md": self._truncate(state.task_md, 800),
-                    "result_preview": self._truncate(state.result_md, 1200),
+                    "task_md": AgentUtils.truncate(state.task_md, 800),
+                    "result_preview": AgentUtils.truncate(state.result_md, 1200),
                     "policy_id": self.policy_id,
                     "git_commit": self.git_commit,
                     "loop_mode": self.loop_mode,
@@ -587,23 +466,23 @@ class ReverseExpertAgentCore:
                     f"- status: {state.status}",
                     f"- profile: {state.profile}",
                     f"- priority: {state.priority}",
-                    f"- task: {self._truncate(state.task_md, 600)}",
+                    f"- task: {AgentUtils.truncate(state.task_md, 600)}",
                     "- result:",
-                    self._truncate(state.result_md or "(empty subagent result)", 3200),
+                    AgentUtils.truncate(state.result_md or "(empty subagent result)", 3200),
                     "",
                 ]
             )
         return "\n".join(lines).strip()
 
     def _is_protected_policy_obj(self, message_obj: Any) -> bool:
-        message_id = self._message_id_of_obj(message_obj)
+        message_id = self.policy_mgr.message_id_of_obj(message_obj)
         if not message_id:
             return False
-        ref = self._policy_messages_by_id.get(message_id)
+        ref = self.policy_mgr._policy_messages_by_id.get(message_id)
         return bool(ref and ref.protected)
 
     def _context_rows(self, *, include_pruned: bool = False, include_folded: bool = True) -> List[ContextMessageRow]:
-        rows = list(self._context_messages) if include_pruned else [row for row in self._context_messages if not row.pruned]
+        rows = list(self.context_mgr._context_messages) if include_pruned else [row for row in self.context_mgr._context_messages if not row.pruned]
         if include_folded:
             return rows
         return [row for row in rows if not row.folded]
@@ -615,7 +494,7 @@ class ReverseExpertAgentCore:
         include_pruned: bool = False,
         include_folded: bool = True,
     ) -> str:
-        rows = self._context_rows(include_pruned=include_pruned, include_folded=include_folded)
+        rows = self.context_mgr.get_rows(include_pruned=include_pruned, include_folded=include_folded)
         if not rows:
             return "(empty)"
         if max_messages is None:
@@ -634,7 +513,7 @@ class ReverseExpertAgentCore:
             lines.append(f"- source: {row.source}")
             lines.append(f"- turn_id: {row.turn_id}")
             content_text = self.context_fold_placeholder if row.folded else row.content
-            lines.append(f"- content: {self._truncate(content_text, 380)}")
+            lines.append(f"- content: {AgentUtils.truncate(content_text, 380)}")
             lines.append("")
         return "\n".join(lines)
 
@@ -684,18 +563,18 @@ class ReverseExpertAgentCore:
                 lines.append("- (none)")
                 return lines
             for item in items[:cap]:
-                lines.append(f"- {self._truncate(item, 260)}")
+                lines.append(f"- {AgentUtils.truncate(item, 260)}")
             if len(items) > cap:
                 lines.append(f"- ... and {len(items) - cap} more")
             return lines
 
         blocks: List[str] = []
-        blocks.extend(_section("Confirmed Facts", self._working_knowledge.confirmed_facts))
-        blocks.extend(_section("Hypotheses", self._working_knowledge.hypotheses))
-        blocks.extend(_section("Open Questions", self._working_knowledge.open_questions))
-        blocks.extend(_section("Evidence", self._working_knowledge.evidence))
-        blocks.extend(_section("Next Actions", self._working_knowledge.next_actions))
-        blocks.extend(_section("Do Not Repeat", self._working_knowledge.do_not_repeat))
+        blocks.extend(_section("Confirmed Facts", self.knowledge_mgr.knowledge.confirmed_facts))
+        blocks.extend(_section("Hypotheses", self.knowledge_mgr.knowledge.hypotheses))
+        blocks.extend(_section("Open Questions", self.knowledge_mgr.knowledge.open_questions))
+        blocks.extend(_section("Evidence", self.knowledge_mgr.knowledge.evidence))
+        blocks.extend(_section("Next Actions", self.knowledge_mgr.knowledge.next_actions))
+        blocks.extend(_section("Do Not Repeat", self.knowledge_mgr.knowledge.do_not_repeat))
         return "\n".join(blocks)
 
     @staticmethod
@@ -833,10 +712,10 @@ class ReverseExpertAgentCore:
                 role = "tool"
             else:
                 role = "user"
-            content_text = self._content_to_text(getattr(msg, "content", ""))
+            content_text = AgentUtils.content_to_text(getattr(msg, "content", ""))
             row: Dict[str, Any] = {
                 "role": role,
-                "content": self._truncate(content_text, self.message_log_chars),
+                "content": AgentUtils.truncate(content_text, self.message_log_chars),
             }
             if role == "assistant":
                 tool_calls = getattr(msg, "tool_calls", None)
@@ -875,14 +754,14 @@ class ReverseExpertAgentCore:
         total_chars = 0
         total_tokens = 0
         for msg in messages:
-            body = self._content_to_text(getattr(msg, "content", ""))
+            body = AgentUtils.content_to_text(getattr(msg, "content", ""))
             total_chars += len(body)
-            total_tokens += self._estimate_tokens(body)
+            total_tokens += PolicyManager.estimate_tokens(body)
             tool_calls = getattr(msg, "tool_calls", None)
             if tool_calls:
-                tc_text = self._content_to_text(tool_calls)
+                tc_text = AgentUtils.content_to_text(tool_calls)
                 total_chars += len(tc_text)
-                total_tokens += self._estimate_tokens(tc_text)
+                total_tokens += PolicyManager.estimate_tokens(tc_text)
         return {
             "message_count": len(messages),
             "total_chars": total_chars,
@@ -906,13 +785,13 @@ class ReverseExpertAgentCore:
                 role = "tool"
             else:
                 role = "user"
-            message_id = self._message_id_of_obj(msg) or f"Message_{idx:06d}"
+            message_id = self.policy_mgr.message_id_of_obj(msg) or f"Message_{idx:06d}"
             lines.append(f"消息ID: {message_id}")
             lines.append(f"- role: {role}")
-            lines.append(f"- content: {self._truncate(self._content_to_text(getattr(msg, 'content', '')), 1200)}")
+            lines.append(f"- content: {AgentUtils.truncate(AgentUtils.content_to_text(getattr(msg, 'content', '')), 1200)}")
             tool_calls = getattr(msg, "tool_calls", None)
             if isinstance(tool_calls, list) and tool_calls:
-                lines.append(f"- tool_calls: {self._truncate(self._content_to_text(tool_calls), 800)}")
+                lines.append(f"- tool_calls: {AgentUtils.truncate(AgentUtils.content_to_text(tool_calls), 800)}")
             if role == "tool":
                 lines.append(f"- tool_call_id: {str(getattr(msg, 'tool_call_id', '') or '')}")
             lines.append("")
@@ -924,16 +803,16 @@ class ReverseExpertAgentCore:
             {
                 "user_request": str(user_request or ""),
                 "iteration": int(iteration),
-                "key_technical_concepts": self._knowledge_markdown(max_items=8),
+                "key_technical_concepts": self.knowledge_mgr.to_markdown(max_items=8),
                 "pending_tasks": self.task_board.render_status_board(),
-                "current_work": self._context_markdown(max_messages=30),
-                "optional_next_step": "\n".join([f"- {x}" for x in self._working_knowledge.next_actions[:10]]) or "- 无",
-                "handoff_anchors": "\n".join([f"- {x}" for x in self._working_knowledge.evidence[:10]]) or "- 无",
+                "current_work": self.context_mgr.to_markdown(max_messages=30),
+                "optional_next_step": "\n".join([f"- {x}" for x in self.knowledge_mgr.knowledge.next_actions[:10]]) or "- 无",
+                "handoff_anchors": "\n".join([f"- {x}" for x in self.knowledge_mgr.knowledge.evidence[:10]]) or "- 无",
             },
         )
 
     def _build_precompression_notice(self, *, iteration: int, usage: Dict[str, int], reason: str) -> str:
-        rows = self._active_policy_refs()
+        rows = self.policy_mgr.active_refs()
         lines: List[str] = []
         if not rows:
             lines.append("(empty context)")
@@ -943,8 +822,8 @@ class ReverseExpertAgentCore:
                 if row.protected:
                     state_parts.append("protected")
                 lines.append(f"- {row.message_id} [{row.role}] state={','.join(state_parts)} source=policy")
-                content_text = self._content_to_text(getattr(row.message_obj, "content", ""))
-                lines.append(f"  {self._truncate(content_text, 180)}")
+                content_text = AgentUtils.content_to_text(getattr(row.message_obj, "content", ""))
+                lines.append(f"  {AgentUtils.truncate(content_text, 180)}")
         return self.prompt_manager.render(
             "agent/precompression_notice.md",
             {
@@ -967,7 +846,7 @@ class ReverseExpertAgentCore:
         turn_id: str,
         reason: str,
     ) -> None:
-        usage_before = self._policy_history_usage(messages)
+        usage_before = self.policy_mgr.calculate_usage(messages)
         original_count = len(messages)
         keep_tail = max(20, int(self.policy_history_keep_tail_messages))
         tail_start = max(0, len(messages) - keep_tail)
@@ -992,22 +871,22 @@ class ReverseExpertAgentCore:
                 user_request=user_request,
                 iteration=iteration,
                 task_board_md=self.task_board.get_task_board(view="both"),
-                knowledge_md=self._knowledge_markdown(max_items=20),
-                context_md=self._context_markdown(max_messages=60),
+                knowledge_md=self.knowledge_mgr.to_markdown(max_items=20),
+                context_md=self.context_mgr.to_markdown(max_messages=60),
                 history_md=history_md,
             )
             distilled_summary = str(distilled.summary_markdown or "").strip()
             do_not_repeat = list(distilled.do_not_repeat or [])
             next_actions = list(distilled.next_actions or [])
             if distilled.confirmed_facts:
-                self._update_knowledge(
+                self.knowledge_mgr.update(
                     section="confirmed_facts",
                     values=list(distilled.confirmed_facts),
                     overwrite=False,
                     source="context_distiller",
                 )
             if distilled.evidence:
-                self._update_knowledge(
+                self.knowledge_mgr.update(
                     section="evidence",
                     values=list(distilled.evidence),
                     overwrite=False,
@@ -1017,14 +896,14 @@ class ReverseExpertAgentCore:
             distilled_summary = ""
 
         if do_not_repeat:
-            self._update_knowledge(
+            self.knowledge_mgr.update(
                 section="do_not_repeat",
                 values=do_not_repeat,
                 overwrite=False,
                 source="context_distiller",
             )
         if next_actions:
-            self._update_knowledge(
+            self.knowledge_mgr.update(
                 section="next_actions",
                 values=next_actions,
                 overwrite=False,
@@ -1035,7 +914,7 @@ class ReverseExpertAgentCore:
             distilled_summary = self._build_policy_compress_snapshot(iteration=iteration, user_request=user_request)
 
         rebuilt: List[Any] = list(protected_messages)
-        self._append_policy_message(
+        self.policy_mgr.append_message(
             messages=rebuilt,
             message_obj=HumanMessage(content=distilled_summary),
             role="user",
@@ -1047,9 +926,9 @@ class ReverseExpertAgentCore:
                 continue
             rebuilt.append(msg)
         messages[:] = rebuilt
-        self._refresh_policy_message_active_flags(messages)
+        self.policy_mgr.refresh_active_flags(messages)
 
-        usage_after = self._policy_history_usage(messages)
+        usage_after = self.policy_mgr.calculate_usage(messages)
         self.obs.emit(
             "context_compressed",
             {
@@ -1065,8 +944,8 @@ class ReverseExpertAgentCore:
                 "after_chars": int(usage_after.get("total_chars", 0)),
                 "before_tokens_est": int(usage_before.get("total_tokens", 0)),
                 "after_tokens_est": int(usage_after.get("total_tokens", 0)),
-                "do_not_repeat": list(self._working_knowledge.do_not_repeat[-12:]),
-                "next_actions": list(self._working_knowledge.next_actions[-12:]),
+                "do_not_repeat": list(self.knowledge_mgr.knowledge.do_not_repeat[-12:]),
+                "next_actions": list(self.knowledge_mgr.knowledge.next_actions[-12:]),
                 "policy_id": self.policy_id,
                 "git_commit": self.git_commit,
                 "loop_mode": self.loop_mode,
@@ -1083,7 +962,7 @@ class ReverseExpertAgentCore:
         parent_agent_id: str,
         turn_id: str,
     ) -> str:
-        usage = self._policy_history_usage(messages)
+        usage = self.policy_mgr.calculate_usage(messages)
         max_messages = max(10, int(self.policy_history_max_messages))
         max_chars = max(40000, int(self.policy_history_max_chars))
         soft_messages = max(8, int(max_messages * float(self.policy_history_soft_ratio)))
@@ -1355,7 +1234,7 @@ class ReverseExpertAgentCore:
             for section, values in mapping.items():
                 if not values:
                     continue
-                self._update_knowledge(section=section, values=values, overwrite=bool(overwrite), source="tool")
+                self.knowledge_mgr.update(section=section, values=values, overwrite=bool(overwrite), source="tool")
                 touched.append(section)
             if not touched:
                 return "ERROR: no knowledge fields provided"
@@ -1379,7 +1258,7 @@ class ReverseExpertAgentCore:
             Returns:
                 Markdown 纯文本工作记忆。
             """
-            return self._knowledge_markdown(max_items=40)
+            return self.knowledge_mgr.to_markdown(max_items=40)
 
         @tool("prune_context_messages", parse_docstring=True, error_on_invalid_docstring=True)
         def prune_context_messages(remove_message_ids: str = "", fold_message_ids: str = "", reason: str = "") -> str:
@@ -1404,8 +1283,8 @@ class ReverseExpertAgentCore:
             Returns:
                 Markdown 纯文本执行报告。
             """
-            remove_ids = self._extract_message_ids(remove_message_ids)
-            fold_ids = self._extract_message_ids(fold_message_ids)
+            remove_ids = PolicyManager._extract_message_ids(remove_message_ids)
+            fold_ids = PolicyManager._extract_message_ids(fold_message_ids)
             targets: List[str] = []
             seen = set()
             for mid in remove_ids + fold_ids:
@@ -1419,7 +1298,7 @@ class ReverseExpertAgentCore:
             already_folded: List[str] = []
             unmatched: List[str] = []
             for mid in targets:
-                status = self._fold_policy_message(mid, reason=reason)
+                status = self.policy_mgr.fold_message(mid, reason=reason)
                 if status == "folded":
                     folded.append(mid)
                 elif status == "protected":
@@ -1523,7 +1402,7 @@ class ReverseExpertAgentCore:
                     keep_n = max(1, int(str(keep_recent or "60").strip()))
                 except Exception:
                     keep_n = 60
-                active = [row for row in self._active_policy_refs() if (not row.protected)]
+                active = [row for row in self.policy_mgr.active_refs() if (not row.protected)]
                 drop = active[:-keep_n] if len(active) > keep_n else []
                 drop_ids = [row.message_id for row in drop]
                 if not drop_ids:
@@ -1571,7 +1450,7 @@ class ReverseExpertAgentCore:
             task_md = str(task or "").strip()
             if not task_md:
                 return "ERROR: missing task"
-            sub_id = f"{current_agent_id}.s{len(self._subagents) + 1}_{uuid.uuid4().hex[:6]}"
+            sub_id = f"{current_agent_id}.s{len(self.subagent_mgr._subagents) + 1}_{uuid.uuid4().hex[:6]}"
             state = SubAgentState(
                 agent_id=sub_id,
                 parent_agent_id=current_agent_id,
@@ -1582,7 +1461,7 @@ class ReverseExpertAgentCore:
                 created_at=time.time(),
                 updated_at=time.time(),
             )
-            self._subagents[sub_id] = state
+            self.subagent_mgr._subagents[sub_id] = state
 
             async def _runner() -> None:
                 try:
@@ -1616,7 +1495,7 @@ class ReverseExpertAgentCore:
                             "parent_agent_id": state.parent_agent_id,
                             "status": state.status,
                             "error": state.error_text,
-                            "result_preview": self._truncate(state.result_md, 1200),
+                            "result_preview": AgentUtils.truncate(state.result_md, 1200),
                             "policy_id": self.policy_id,
                             "git_commit": self.git_commit,
                             "loop_mode": self.loop_mode,
@@ -1631,8 +1510,8 @@ class ReverseExpertAgentCore:
                     "parent_agent_id": current_agent_id,
                     "profile": state.profile,
                     "priority": state.priority,
-                    "task_md": self._truncate(state.task_md, 2400),
-                    "context_md": self._truncate(state.context_md, 1800),
+                    "task_md": AgentUtils.truncate(state.task_md, 2400),
+                    "context_md": AgentUtils.truncate(state.context_md, 1800),
                     "policy_id": self.policy_id,
                     "git_commit": self.git_commit,
                     "loop_mode": self.loop_mode,
@@ -1668,7 +1547,7 @@ class ReverseExpertAgentCore:
             Returns:
                 纯文本确认信息。
             """
-            pending = self._pending_subagents_for_parent(parent_agent_id=current_agent_id)
+            pending = self.subagent_mgr.pending_for_parent(parent_agent_id=current_agent_id)
             if pending:
                 lines = [
                     "ERROR: submit_output blocked by running subagents",
@@ -1896,7 +1775,7 @@ class ReverseExpertAgentCore:
         if not script_text:
             return "ERROR: missing script"
 
-        destructive_ops = self._find_destructive_struct_ops(script_text)
+        destructive_ops = AgentUtils.find_destructive_struct_ops(script_text)
         if destructive_ops:
             return (
                 "ERROR: destructive struct operation is blocked in execute_idapython.\n"
@@ -1943,11 +1822,11 @@ class ReverseExpertAgentCore:
             [
                 "## Initial Script",
                 "```python",
-                self._truncate(script_text, 3600),
+                AgentUtils.truncate(script_text, 3600),
                 "```",
                 "",
                 "## Initial Failure",
-                self._truncate(first_output, 3200),
+                AgentUtils.truncate(first_output, 3200),
                 "",
                 "## Runtime Context Keys",
                 ", ".join(sorted([str(k) for k in runtime_context.keys()])) or "(empty)",
@@ -2032,8 +1911,8 @@ class ReverseExpertAgentCore:
                 "parent_agent_id": parent_agent_id,
                 "profile": profile_name,
                 "priority": str(request.get("priority", "normal") or "normal"),
-                "task_md": self._truncate(str(request.get("task", "") or ""), 2400),
-                "output_preview": self._truncate(output, 1600),
+                "task_md": AgentUtils.truncate(str(request.get("task", "") or ""), 2400),
+                "output_preview": AgentUtils.truncate(output, 1600),
                 "latency_s": round(latency, 4),
                 "policy_id": self.policy_id,
                 "git_commit": self.git_commit,
@@ -2108,21 +1987,21 @@ class ReverseExpertAgentCore:
             {
                 "user_request": str(user_request or ""),
                 "task": str(request.get("task", "") or "").strip(),
-                "context": self._truncate(str(request.get("context", "") or "").strip(), self.subagent_max_context_chars),
+                "context": AgentUtils.truncate(str(request.get("context", "") or "").strip(), self.subagent_max_context_chars),
             },
         )
 
         max_iters = max(1, int(max_iterations))
         messages: List[Any] = []
         init_turn_id = f"{agent_id}:0:subpolicy:init"
-        self._append_policy_message(
+        self.policy_mgr.append_message(
             messages=messages,
             message_obj=SystemMessage(content=system_prompt),
             role="system",
             turn_id=init_turn_id,
             protected=True,
         )
-        self._append_policy_message(
+        self.policy_mgr.append_message(
             messages=messages,
             message_obj=HumanMessage(content=human_prompt),
             role="user",
@@ -2131,9 +2010,9 @@ class ReverseExpertAgentCore:
         )
         for iteration in range(1, max_iters + 1):
             turn_id = f"{agent_id}:{iteration}:subpolicy:{uuid.uuid4().hex[:8]}"
-            subagent_updates = self._drain_completed_subagent_updates(parent_agent_id=agent_id)
+            subagent_updates = self.subagent_mgr.drain_completed_updates(parent_agent_id=agent_id)
             if subagent_updates:
-                self._append_policy_message(
+                self.policy_mgr.append_message(
                     messages=messages,
                     message_obj=HumanMessage(content=subagent_updates),
                     role="user",
@@ -2150,7 +2029,7 @@ class ReverseExpertAgentCore:
             )
             interaction_start = len(messages)
             if str(compression_prompt or "").strip():
-                self._append_policy_message(
+                self.policy_mgr.append_message(
                     messages=messages,
                     message_obj=HumanMessage(content=str(compression_prompt).strip()),
                     role="user",
@@ -2183,9 +2062,9 @@ class ReverseExpertAgentCore:
             interaction_started = time.perf_counter()
             response = await self._ainvoke_with_retry(llm_with_tools, messages, max_retries=self.llm_max_retries)
             response_content = getattr(response, "content", "") or ""
-            response_text = self._content_to_text(response_content)
+            response_text = AgentUtils.content_to_text(response_content)
             tool_calls = self._normalize_tool_calls(getattr(response, "tool_calls", None), turn_id=turn_id)
-            self._append_policy_message(
+            self.policy_mgr.append_message(
                 messages=messages,
                 message_obj=AIMessage(content=response_text, tool_calls=tool_calls),
                 role="assistant",
@@ -2195,7 +2074,7 @@ class ReverseExpertAgentCore:
 
             assistant_text = response_text.strip()
             if assistant_text:
-                self._append_context_message(
+                self.context_mgr.append(
                     role="assistant",
                     source="llm:subpolicy",
                     content=assistant_text,
@@ -2216,7 +2095,7 @@ class ReverseExpertAgentCore:
                 for idx, row in enumerate(outputs, start=1):
                     tool_call_id = str(row.get("tool_call_id", "") or call_rows[idx - 1].get("id", "") or f"{turn_id}:tool:{idx}")
                     result_text = str(row.get("result", "") or "")
-                    self._append_policy_message(
+                    self.policy_mgr.append_message(
                         messages=messages,
                         message_obj=ToolMessage(content=result_text, tool_call_id=tool_call_id),
                         role="tool",
@@ -2314,7 +2193,7 @@ class ReverseExpertAgentCore:
                 self._effective_mutation_count += 1
                 if self._is_type_application_tool(str(row.get("tool_name", "") or "")):
                     self._effective_type_application_count += 1
-            self._append_context_message(
+            self.context_mgr.append(
                 role="tool",
                 source=f"policy:{str(row.get('tool_name', '') or '')}",
                 content=result_text,
@@ -2347,7 +2226,7 @@ class ReverseExpertAgentCore:
             return True
         if self._context_compress_requested or self._precompression_notice_pending:
             return True
-        usage = self._policy_history_usage(messages)
+        usage = self.policy_mgr.calculate_usage(messages)
         max_messages = max(10, int(self.policy_history_max_messages))
         max_chars = max(40000, int(self.policy_history_max_chars))
         soft_messages = max(8, int(max_messages * float(self.policy_history_soft_ratio)))
@@ -2378,7 +2257,7 @@ class ReverseExpertAgentCore:
             self.task_board.get_task_board(view="both"),
             "",
             "## Working Knowledge",
-            self._knowledge_markdown(max_items=20),
+            self.knowledge_mgr.to_markdown(max_items=20),
             "",
         ]
         return "\n".join(lines).strip() + "\n"
@@ -2409,7 +2288,7 @@ class ReverseExpertAgentCore:
             self.task_board.get_task_board(view="both"),
             "",
             "## Working Knowledge",
-            self._knowledge_markdown(max_items=20),
+            self.knowledge_mgr.to_markdown(max_items=20),
             "",
         ]
         return "\n".join(lines).strip() + "\n"
@@ -2426,7 +2305,7 @@ class ReverseExpertAgentCore:
             self.task_board.get_task_board(view="both"),
             "",
             "## Working Knowledge",
-            self._knowledge_markdown(max_items=20),
+            self.knowledge_mgr.to_markdown(max_items=20),
             "",
         ]
         return "\n".join(lines).strip() + "\n"
@@ -2456,14 +2335,14 @@ class ReverseExpertAgentCore:
 
         messages: List[Any] = []
         init_turn_id = f"{agent_id}:0:policy:init"
-        self._append_policy_message(
+        self.policy_mgr.append_message(
             messages=messages,
             message_obj=SystemMessage(content=system_prompt),
             role="system",
             turn_id=init_turn_id,
             protected=True,
         )
-        self._append_policy_message(
+        self.policy_mgr.append_message(
             messages=messages,
             message_obj=HumanMessage(content=str(user_request or "").strip()),
             role="user",
@@ -2473,9 +2352,9 @@ class ReverseExpertAgentCore:
 
         for iteration in range(1, max_iters + 1):
             turn_id = f"{agent_id}:{iteration}:policy:{uuid.uuid4().hex[:8]}"
-            subagent_updates = self._drain_completed_subagent_updates(parent_agent_id=agent_id)
+            subagent_updates = self.subagent_mgr.drain_completed_updates(parent_agent_id=agent_id)
             if subagent_updates:
-                self._append_policy_message(
+                self.policy_mgr.append_message(
                     messages=messages,
                     message_obj=HumanMessage(content=subagent_updates),
                     role="user",
@@ -2492,7 +2371,7 @@ class ReverseExpertAgentCore:
             )
             interaction_start = len(messages)
             if str(compression_prompt or "").strip():
-                self._append_policy_message(
+                self.policy_mgr.append_message(
                     messages=messages,
                     message_obj=HumanMessage(content=str(compression_prompt).strip()),
                     role="user",
@@ -2537,9 +2416,9 @@ class ReverseExpertAgentCore:
                 raise
 
             response_content = getattr(response, "content", "") or ""
-            response_text = self._content_to_text(response_content)
+            response_text = AgentUtils.content_to_text(response_content)
             tool_calls = self._normalize_tool_calls(getattr(response, "tool_calls", None), turn_id=turn_id)
-            self._append_policy_message(
+            self.policy_mgr.append_message(
                 messages=messages,
                 message_obj=AIMessage(content=response_text, tool_calls=tool_calls),
                 role="assistant",
@@ -2549,7 +2428,7 @@ class ReverseExpertAgentCore:
 
             assistant_text = response_text.strip()
             if assistant_text:
-                self._append_context_message(
+                self.context_mgr.append(
                     role="assistant",
                     source="llm:policy",
                     content=assistant_text,
@@ -2570,7 +2449,7 @@ class ReverseExpertAgentCore:
                 for idx, row in enumerate(outputs, start=1):
                     tool_call_id = str(row.get("tool_call_id", "") or call_rows[idx - 1].get("id", "") or f"{turn_id}:tool:{idx}")
                     result_text = str(row.get("result", "") or "")
-                    self._append_policy_message(
+                    self.policy_mgr.append_message(
                         messages=messages,
                         message_obj=ToolMessage(content=result_text, tool_call_id=tool_call_id),
                         role="tool",
@@ -2644,7 +2523,7 @@ class ReverseExpertAgentCore:
                 {
                     "duration_s": round(time.perf_counter() - run_started, 4),
                     "iterations_used": iterations_used,
-                    "final_response": self._truncate(final_text, 12000),
+                    "final_response": AgentUtils.truncate(final_text, 12000),
                     "effective_mutation_count": int(self._effective_mutation_count),
                     "effective_type_application_count": int(self._effective_type_application_count),
                     "completed_reason": str(result.get("reason", "")),

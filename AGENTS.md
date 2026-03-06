@@ -12,6 +12,7 @@ Agent 必须 以 LLM 为主导， 核心逻辑都在提示词、tool、任务调
 **要求**:
 - 尽量不编写测试用例，语义上排错即可，测试用例使用后删除
 - idapython 只考虑 ida 9.3 ,其余版本不考虑
+- 开发中途的测试脚本，使用后要删除
 
 ## 输入输出
 
@@ -44,3 +45,10 @@ OPENAI_API_KEY='your-api-key-1' \
 OPENAI_BASE_URL='http://192.168.72.1:8317/v1' \
 OPENAI_MODEL='gpt-5.2' \
 ```
+
+
+## 文档
+
+- 开发前生成的 plan, 开发文档 保存到 reference/docs 目录下, 不要存放到根路径
+- 分析报告、文档存放 reference/docs 
+

@@ -611,39 +611,38 @@ def main():
     _write_text(acceptance_md_path, acceptance_md)
     print(f"[ACCEPTANCE] Summary markdown: {acceptance_md_path}")
     print(f"[ACCEPTANCE] Summary JSON: {os.path.join(report_dir, 'acceptance_summary.json')}")
-    print(
-        "[ACCEPTANCE] Mutation stats: "
-        f"attempt={int(mutation_stats.get('attempt_count', 0))}, "
-        f"effective={int(mutation_stats.get('effective_success_count', mutation_stats.get('success_count', 0)))}, "
-        f"noop={int(mutation_stats.get('noop_count', 0))}, "
-        f"error={int(mutation_stats.get('error_count', 0))}"
-    )
+
+    # Only print mutation stats if there were actual attempts
+    attempt_count = int(mutation_stats.get('attempt_count', 0))
+    if attempt_count > 0:
+        print(
+            "[ACCEPTANCE] Mutation stats: "
+            f"attempt={attempt_count}, "
+            f"effective={int(mutation_stats.get('effective_success_count', mutation_stats.get('success_count', 0)))}, "
+            f"noop={int(mutation_stats.get('noop_count', 0))}, "
+            f"error={int(mutation_stats.get('error_count', 0))}"
+        )
 
     if not session_id:
-        print("[ERROR] acceptance check requires session id, but session id is empty.")
+        print("[ERROR] Acceptance check failed: missing session ID")
         return 3
     tool_call_count = int(event_counts.get("tool_call", 0))
     if tool_call_count <= 0:
-        print("[ERROR] acceptance no-op detected: tool_call_count=0")
-        print("[ERROR] No effective recovery action executed; investigate LLM/tool flow before accepting this run.")
+        print("[ERROR] Acceptance failed: no tool calls executed (tool_call_count=0)")
         return 3
 
     if run_error:
-        print(f"[ERROR] acceptance run failure: {run_error}")
-        print("[ERROR] Artifacts were still generated for review, but this run cannot be accepted.")
+        print(f"[ERROR] Acceptance failed: {run_error}")
         return 7
 
     if int(mutation_stats.get("effective_success_count", mutation_stats.get("success_count", 0))) <= 0:
-        print("[ERROR] acceptance no-mutation detected: no effective mutating tool action observed.")
-        print("[ERROR] Agent only performed evidence collection, failed mutation steps, or no-op mutations.")
+        print("[ERROR] Acceptance failed: no effective mutations observed")
         return 5
 
     if not has_meaningful_change:
-        print("[ERROR] acceptance no-diff detected: structs are unchanged.")
+        print("[ERROR] Acceptance failed: no structural changes detected")
         if possible_baseline_pollution:
-            print("[ERROR] Mutations were attempted but no before/after delta was observed.")
-            print("[ERROR] This usually means the input IDB was already in a mutated state (baseline pollution).")
-        print("[ERROR] Effective reverse recovery was not observed; investigate prompts/subagents/tooling before accepting.")
+            print("[WARN] Mutations attempted but no delta observed - possible baseline pollution")
         return 4
 
     return 0
