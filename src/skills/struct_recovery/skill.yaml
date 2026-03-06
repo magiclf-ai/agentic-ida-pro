@@ -1,0 +1,27 @@
+name: struct_recovery
+description: 自动恢复二进制文件中的结构体定义
+version: "1.0.0"
+author: agentic_ida
+
+triggers:
+  - 结构体
+  - struct
+  - 恢复结构
+  - structure recovery
+  - 分析.*结构
+
+capabilities:
+  - 识别结构体指针
+  - 基于伪代码语义推断字段类型和大小
+  - 跨函数传播结构体信息
+  - 语义分析和字段命名
+
+templates:
+  - name: create_struct
+    file: templates/create_struct.py
+    description: 使用 C 声明创建或更新结构体定义
+
+dependencies:
+  - ida_hexrays
+  - ida_struct
+  - ida_typeinf

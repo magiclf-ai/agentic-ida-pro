@@ -1,0 +1,19 @@
+# Agentic IDA Pro - 项目依赖
+
+# LangChain 核心库
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+
+# HTTP 客户端
+requests>=2.31.0
+
+# 配置解析
+pyyaml>=6.0.0
+jinja2>=3.1.0
+
+# Flask (IDA Service)
+flask>=3.0.0
+
+# IDA Pro SDK (需要 IDA Pro 9.0+)
+# 注意: idalib 需要 IDA Pro 安装，不是通过 pip 安装
+# 安装 IDA Pro 后，确保 Python 能访问 ida_*.py 模块

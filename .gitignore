@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs and runtime files
+logs/
+runtime/
+*.log
+
+# IDE / editor
+.vscode/
+.idea/
+.codebuddy/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDA Pro database artifacts
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.dmp
+test_binaries/
+
+# Local env files
+.env
+.env.*
+
+
+reference/
+docs/

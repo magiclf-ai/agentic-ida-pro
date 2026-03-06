@@ -1,0 +1,25 @@
+name: function_analysis
+description: 深度分析函数的逻辑、控制流和语义
+version: "1.0.0"
+author: agentic_ida
+
+triggers:
+  - 函数分析
+  - function analysis
+  - 分析函数
+  - 分析.*函数
+  - 函数逻辑
+
+capabilities:
+  - 分析函数控制流
+  - 识别函数参数和返回值
+  - 提取函数语义
+  - 追踪函数调用关系
+  - 分析变量使用
+
+templates: []
+
+dependencies:
+  - ida_hexrays
+  - ida_funcs
+  - ida_graph

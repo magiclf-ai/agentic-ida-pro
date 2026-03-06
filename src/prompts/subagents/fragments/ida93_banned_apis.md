@@ -1,0 +1,13 @@
+## IDA 9.3+ 高风险/不建议 API（优先替代）
+- `idaapi.add_struc` / `idaapi.add_struc_member`
+  - 问题：不同运行时常见不可用或兼容差。
+  - 替代：`idc.add_struc` / `idc.add_struc_member`。
+- `idc.parse_decls` / `ida_typeinf.parse_decls`（盲目试参）
+  - 问题：签名在不同构建下差异大，常见参数错误。
+  - 替代：优先 `idc.SetType`、结构化工具或已知可用声明流程。
+- `ida_struct` 直接依赖（在部分运行时缺失）
+  - 问题：模块并非总是可导入。
+  - 替代：优先 `idc`、`idautils`、`ida_hexrays`、`ida_typeinf`。
+- 破坏性删除操作：`idc.del_struc(...)`
+  - 问题：会破坏已有恢复证据。
+  - 替代：非破坏更新（新增成员、设置类型、重反编译验证）。
