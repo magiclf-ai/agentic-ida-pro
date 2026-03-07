@@ -213,8 +213,6 @@ def execute_idapython(script: str, context: Optional[Dict[str, Any]] = None) -> 
     Returns:
         执行结果，包含 success, result, stdout, stderr
     
-    Examples:
-        >>> execute_idapython("import idc; __result__ = idc.get_func_name(0x1000)")
     """
     destructive_ops = _find_destructive_struct_ops(script)
     if destructive_ops:
@@ -342,9 +340,6 @@ def get_function_info(name: Optional[str] = None, addr: Optional[int] = None) ->
     Returns:
         函数信息字典的字符串表示
     
-    Examples:
-        >>> get_function_info(name="main")
-        >>> get_function_info(addr=0x1000)
     """
     client = get_ida_client()
     try:
@@ -360,12 +355,13 @@ def get_function_info(name: Optional[str] = None, addr: Optional[int] = None) ->
 def list_all_functions() -> str:
     """
     列出数据库中的所有函数
+
+    Args:
+        None
     
     Returns:
         所有函数的列表，包含 ea, name, size
     
-    Examples:
-        >>> list_all_functions()
     """
     client = get_ida_client()
     try:
@@ -399,9 +395,6 @@ def decompile_function(
     Returns:
         反编译后的伪代码字符串
     
-    Examples:
-        >>> decompile_function(function_name="main")
-        >>> decompile_function(ea=0x1000)
     """
     client = get_ida_client()
     try:
@@ -435,9 +428,6 @@ def search(
     Returns:
         搜索结果（含 total_count 与分页游标）
 
-    Examples:
-        >>> search(pattern="sub_1400.*", target_type="symbol", offset=0, count=20)
-        >>> search(pattern="(?i)http|token", target_type="string", offset=20, count=20)
     """
     client = get_ida_client()
     try:
@@ -518,10 +508,6 @@ def xref(
     Returns:
         交叉引用结果（优先展示 func_name+offset，否则 ea）
 
-    Examples:
-        >>> xref(target="sub_140001000", target_type="symbol", direction="to", offset=0, count=30)
-        >>> xref(target="(?i)http|api", target_type="string", direction="to", offset=0, count=30)
-        >>> xref(target="0x140010000", target_type="ea", direction="both", offset=0, count=20)
     """
     client = get_ida_client()
     try:
@@ -681,11 +667,6 @@ def create_structure(
     Returns:
         创建结果（包含 C 声明与 mutation_effective）
     
-    Examples:
-        >>> create_structure(
-        ...     name="my_struct",
-        ...     c_decl="struct my_struct { uint32_t field1; uint64_t field2; };",
-        ... )
     """
     client = get_ida_client()
     try:
@@ -723,9 +704,6 @@ def get_xrefs_to(ea: int) -> str:
     Returns:
         交叉引用列表
     
-    Examples:
-        >>> get_xrefs_to(0x1000)
-        >>> get_xrefs_to(4096)
     """
     client = get_ida_client()
     try:
@@ -749,9 +727,6 @@ def get_xrefs_from(ea: int) -> str:
     Returns:
         交叉引用列表
     
-    Examples:
-        >>> get_xrefs_from(0x1000)
-        >>> get_xrefs_from(4096)
     """
     client = get_ida_client()
     try:
@@ -768,12 +743,13 @@ def get_xrefs_from(ea: int) -> str:
 def get_database_info() -> str:
     """
     获取当前 IDA 数据库的基本信息
+
+    Args:
+        None
     
     Returns:
         数据库信息（路径、处理器、基址等）
     
-    Examples:
-        >>> get_database_info()
     """
     client = get_ida_client()
     try:
@@ -877,6 +853,92 @@ def inspect_symbol_usage(
         return "\n".join(lines)
     except Exception as e:
         return f"ERROR: inspecting symbol usage failed: {str(e)}"
+
+
+@tool(parse_docstring=True, error_on_invalid_docstring=True)
+def inspect_variable_accesses(
+    function_name: str,
+    variable_names: str,
+) -> str:
+    """
+    基于 ctree 提取函数中指定变量的访问表达式与偏移信息
+
+    Args:
+        function_name: 目标函数名
+        variable_names: 变量名列表（纯文本，支持换行或逗号分隔）
+
+    Returns:
+        访问摘要（变量/表达式/相对偏移/类型/大小/读写）
+    """
+    client = get_ida_client()
+    try:
+        data = client.inspect_variable_accesses(
+            function_name=function_name,
+            variable_names=variable_names,
+        )
+        if isinstance(data, dict) and str(data.get("error", "")).strip():
+            return f"ERROR: {str(data.get('error')).strip()}"
+
+        def _fmt_offset(value: Any) -> str:
+            if isinstance(value, int):
+                sign = "+" if value >= 0 else "-"
+                return f"{sign}0x{abs(int(value)):x}"
+            return "unknown"
+
+        requested = data.get("requested_variables", []) if isinstance(data, dict) else []
+        present = data.get("present_variables", []) if isinstance(data, dict) else []
+        missing = data.get("missing_variables", []) if isinstance(data, dict) else []
+        accesses = data.get("accesses", []) if isinstance(data, dict) else []
+        lines: List[str] = [
+            "# Variable Access Summary",
+            f"- function: {str(data.get('function', function_name) if isinstance(data, dict) else function_name)}",
+            f"- source: {str(data.get('source', 'ctree') if isinstance(data, dict) else 'ctree')}",
+            f"- requested_count: {len(requested) if isinstance(requested, list) else 0}",
+            f"- present_count: {len(present) if isinstance(present, list) else 0}",
+            f"- missing_count: {len(missing) if isinstance(missing, list) else 0}",
+            f"- access_count: {len(accesses) if isinstance(accesses, list) else 0}",
+            "",
+            "## Requested Variables",
+        ]
+        if isinstance(requested, list) and requested:
+            for name in requested:
+                lines.append(f"- {str(name)}")
+        else:
+            lines.append("- (empty)")
+
+        lines.append("")
+        lines.append("## Missing Variables")
+        if isinstance(missing, list) and missing:
+            for name in missing:
+                lines.append(f"- {str(name)}")
+        else:
+            lines.append("- (none)")
+
+        lines.append("")
+        lines.append("## Accesses")
+        lines.append("| variable | is_argument | expression | relative_offset | inferred_type | access_size | access_kind | ea |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        if isinstance(accesses, list) and accesses:
+            for row in accesses:
+                if not isinstance(row, dict):
+                    continue
+                expr = str(row.get("expression", "") or "").replace("\n", " ").replace("|", "\\|")
+                var_name = str(row.get("variable_name", "") or "")
+                is_arg = "true" if bool(row.get("is_argument", False)) else "false"
+                off_text = _fmt_offset(row.get("relative_offset"))
+                inferred_type = str(row.get("inferred_type", "") or "").replace("|", "\\|")
+                access_size = str(row.get("access_size", ""))
+                access_kind = str(row.get("access_kind", "") or "").strip() or "read"
+                ea = row.get("ea")
+                ea_text = f"0x{int(ea):x}" if isinstance(ea, int) and int(ea) > 0 else "-"
+                lines.append(
+                    f"| {var_name} | {is_arg} | {expr} | {off_text} | {inferred_type} | {access_size} | {access_kind} | {ea_text} |"
+                )
+        else:
+            lines.append("| - | - | - | - | - | - | - | - |")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"ERROR: inspect_variable_accesses failed: {str(e)}"
 
 
 def _normalize_function_names(function_names: List[str]) -> List[str]:
@@ -1242,6 +1304,7 @@ CORE_TOOLS = [
     search,
     xref,
     inspect_symbol_usage,
+    inspect_variable_accesses,
     create_structure,
     set_identifier_type,
     expand_call_path,

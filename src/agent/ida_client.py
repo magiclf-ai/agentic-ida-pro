@@ -497,6 +497,46 @@ else:
             raise Exception(f"Unexpected inspect_symbol_usage payload type: {type(payload).__name__}")
         raise Exception(result.get("stderr") or result.get("error") or "Failed to inspect symbol usage")
 
+    def inspect_variable_accesses(
+        self,
+        function_name: str,
+        variable_names: str,
+    ) -> Dict[str, Any]:
+        """
+        基于 ctree 提取函数内指定变量的访问表达式（偏移/类型/大小）
+
+        Args:
+            function_name: 目标函数名
+            variable_names: 变量名列表，支持换行或逗号分隔
+        """
+        rows: List[str] = []
+        text = str(variable_names or "")
+        text = text.replace(",", "\n")
+        for part in text.splitlines():
+            name = str(part or "").strip()
+            if not name:
+                continue
+            if name in rows:
+                continue
+            rows.append(name)
+        if not rows:
+            raise Exception("No variable names provided")
+
+        script = self._render_script_template(
+            "inspect_variable_accesses.py",
+            {
+                "FUNCTION_NAME": str(function_name),
+                "VARIABLE_NAMES": rows,
+            },
+        )
+        result = self.execute_script(script=script)
+        if result.get("success"):
+            payload = result.get("result")
+            if isinstance(payload, dict):
+                return payload
+            raise Exception(f"Unexpected inspect_variable_accesses payload type: {type(payload).__name__}")
+        raise Exception(result.get("stderr") or result.get("error") or "Failed to inspect variable accesses")
+
     def set_identifier_type(
         self,
         function_name: str,
