@@ -7,6 +7,8 @@ profile={{ profile_name }}
 3) 结构体规划只允许 `create_structure`，禁止启发式偏移工具。
 4) 单函数闭环后必须规划“跨函数复核”和“别名合并”下一步。
 
+{% include "fragments/tool_boundary_contract.md" %}
+
 ## 场景 -> 工具选型指南
 - 下一步不明确：`decompile_function` + `inspect_symbol_usage`
 - 需要数据流/别名补证：基于 `decompile_function` + `inspect_symbol_usage` 手工建立 alias set 并跨函数复核

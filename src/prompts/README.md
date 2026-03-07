@@ -18,6 +18,7 @@ This directory stores all runtime prompts as markdown templates rendered by `Pro
 - `distiller/user.md`: Context distiller user prompt
 - `subagents/*.md`: Subagent profile system prompts
   - includes `subagents/idapython_executor.md` and `subagents/idapython_executor_no_kb.md`
+  - includes `subagents/function_summary_agent.md` and `subagents/function_summary_pointer_access.md`
 
 ## Variables
 
@@ -36,5 +37,9 @@ This directory stores all runtime prompts as markdown templates rendered by `Pro
 
 - Keep output concise, executable, and evidence-driven.
 - Keep markdown structure stable to reduce behavior drift.
-- Tool semantics come from each tool's docstring bound via `bind_tools`; prompts should focus on call strategy instead of duplicating parameter schema.
+- Separation of responsibilities:
+  - `@tool` docstring: definition layer only (`function`/`Args`/`Returns`).
+  - system prompt: strategy layer only (usage advice, applicable/recommended scenarios, usage patterns, examples).
+- Tool semantics come from each tool's docstring bound via `bind_tools`; prompts should focus on call strategy and should not redefine parameter schema.
+- Reusable shared strategy snippets should be put under `fragments/`; prompt-specific content should be kept in the corresponding prompt file; include via Jinja `{% include %}` to avoid drift.
 - Add new profile prompts under `subagents/` with filename as profile name.

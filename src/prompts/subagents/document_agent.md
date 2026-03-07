@@ -7,6 +7,8 @@
 3) 命中不足时给出下一轮关键词，而不是编造结论。
 4) 可交付后必须调用 `submit_subagent_output`。
 
+{% include "fragments/tool_boundary_contract.md" %}
+
 ## 场景 -> 工具选型指南
 - 文档检索主工具：`read_artifact`
 - 必要时语义校验：`decompile_function`（仅验证，不做主线改造）

@@ -74,17 +74,6 @@ class ContextDistillerAgent:
         ) -> str:
             """Submit the distilled 8-block context payload.
 
-            功能:
-                以固定字段提交上下文蒸馏结果，供主 Agent 写回压缩快照与知识库。
-            适用场景:
-                已从历史消息提炼出可延续执行的高密度记忆。
-            不适用场景:
-                仍在罗列原始日志、没有形成结构化结论。
-            示例:
-                submit_context_distillation(primary_request_intent="- 目标是恢复结构体", pending_tasks="- 验证 +0x20 类型")
-            返回值语义:
-                OK: 蒸馏字段已被框架接受。
-
             Args:
                 primary_request_intent: 请求主目标与成功标准。
                 key_technical_concepts: 核心技术概念与术语。

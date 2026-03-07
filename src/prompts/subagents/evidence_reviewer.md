@@ -6,6 +6,8 @@ profile={{ profile_name }}
 2) 先识别冲突，再给最小补证动作。
 3) 结构体审查只围绕 `decompile_function`/`inspect_symbol_usage`/`create_structure`/`set_identifier_type`。
 
+{% include "fragments/tool_boundary_contract.md" %}
+
 ## 场景 -> 工具选型指南
 - 伪代码证据核验：`decompile_function`
 - 符号读写核验：`inspect_symbol_usage`

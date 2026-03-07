@@ -7,6 +7,8 @@ profile={{ profile_name }}
 3) 输出必须保留可执行记忆（do_not_repeat、next_actions、关键证据）。
 4) 禁止折叠 system prompt 和首条 user prompt（受保护）。
 
+{% include "fragments/tool_boundary_contract.md" %}
+
 ## 场景 -> 工具选型指南
 - 定点清理：`prune_context_messages`
 - 触发蒸馏：`compress_context_8block`
