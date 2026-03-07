@@ -94,6 +94,16 @@ const executedToolCalls = computed(() => {
 const executedToolErrorCount = computed(() => {
   return executedToolCalls.value.filter(t => t.is_error).length
 })
+
+const formatToolSchema = (schema) => {
+  if (!schema) return ''
+  if (typeof schema === 'string') return schema
+  try {
+    return JSON.stringify(schema, null, 2)
+  } catch (e) {
+    return String(schema)
+  }
+}
 </script>
 
 <template>
@@ -167,9 +177,18 @@ const executedToolErrorCount = computed(() => {
           <component :is="toolsExpanded ? ChevronUp : ChevronDown" class="section-expand-icon" />
         </div>
         <div v-if="toolsExpanded" class="bound-tools-list">
-          <span v-for="tool in boundTools" :key="tool.id" class="tool-badge" :title="tool.tool_description">
-            {{ tool.tool_name }}
-          </span>
+          <div v-for="tool in boundTools" :key="tool.id" class="tool-definition-card">
+            <div class="tool-def-header">
+              <span class="tool-def-name">{{ tool.tool_name }}</span>
+            </div>
+            <div v-if="tool.tool_description" class="tool-def-description">
+              {{ tool.tool_description }}
+            </div>
+            <div v-if="tool.tool_schema" class="tool-def-schema">
+              <div class="schema-label">Parameters Schema:</div>
+              <pre class="schema-content">{{ formatToolSchema(tool.tool_schema) }}</pre>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -527,27 +546,86 @@ const executedToolErrorCount = computed(() => {
 .bound-tools-list {
   padding: 0 16px 12px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.tool-badge {
-  display: inline-flex;
+.tool-definition-card {
+  padding: 12px;
+  background: rgba(3, 105, 161, 0.06);
+  border: 1px solid rgba(3, 105, 161, 0.15);
+  border-radius: 8px;
+}
+
+.is-dark .tool-definition-card {
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.2);
+}
+
+.tool-def-header {
+  display: flex;
   align-items: center;
-  padding: 3px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  color: #0369a1;
-  background: rgba(3, 105, 161, 0.1);
-  border-radius: 4px;
-  border: 1px solid rgba(3, 105, 161, 0.2);
-  cursor: help;
+  margin-bottom: 6px;
 }
 
-.is-dark .tool-badge {
+.tool-def-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0369a1;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.is-dark .tool-def-name {
   color: #38bdf8;
-  background: rgba(56, 189, 248, 0.15);
-  border-color: rgba(56, 189, 248, 0.3);
+}
+
+.tool-def-description {
+  font-size: 12px;
+  color: #4b5563;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.is-dark .tool-def-description {
+  color: #9ca3af;
+}
+
+.tool-def-schema {
+  margin-top: 8px;
+}
+
+.schema-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.is-dark .schema-label {
+  color: #9ca3af;
+}
+
+.schema-content {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #374151;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.is-dark .schema-content {
+  color: #c9d1d9;
+  background: #0d1117;
+  border-color: #30363d;
 }
 
 .executed-tools-header {

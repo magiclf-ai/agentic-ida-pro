@@ -127,23 +127,31 @@ def _fetch_turn_tools(conn: sqlite3.Connection, session_id: str) -> List[Dict[st
     rows = conn.execute(
         """
         SELECT 
-            id, turn_id, tool_name, tool_description, created_at
+            id, turn_id, tool_name, tool_description, tool_schema, created_at
         FROM turn_tools
         WHERE session_id = ?
         ORDER BY id ASC
         """,
         (session_id,),
     ).fetchall()
-    return [
-        {
+    result = []
+    for row in rows:
+        tool_schema_str = str(row["tool_schema"] or "")
+        tool_schema = None
+        if tool_schema_str:
+            try:
+                tool_schema = json.loads(tool_schema_str)
+            except json.JSONDecodeError:
+                tool_schema = tool_schema_str
+        result.append({
             "id": int(row["id"]),
             "turn_id": str(row["turn_id"] or ""),
             "tool_name": str(row["tool_name"] or ""),
             "tool_description": str(row["tool_description"] or ""),
+            "tool_schema": tool_schema,
             "created_at": str(row["created_at"]),
-        }
-        for row in rows
-    ]
+        })
+    return result
 
 
 def _fetch_executed_tool_calls(conn: sqlite3.Connection, session_id: str) -> List[Dict[str, Any]]:

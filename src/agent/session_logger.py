@@ -98,6 +98,7 @@ class AgentSessionLogger:
               turn_id TEXT NOT NULL,
               tool_name TEXT NOT NULL,
               tool_description TEXT,
+              tool_schema TEXT,
               created_at TEXT NOT NULL
             )
             """
@@ -198,21 +199,48 @@ class AgentSessionLogger:
         for tool in tools:
             tool_name = ""
             tool_desc = ""
+            tool_schema_json = ""
             if isinstance(tool, dict):
                 tool_name = str(tool.get("name", "") or "")
                 tool_desc = str(tool.get("description", "") or "")[:500]
+                # 尝试获取 schema
+                schema = tool.get("parameters") or tool.get("args_schema")
+                if schema:
+                    try:
+                        if hasattr(schema, "model_json_schema"):
+                            tool_schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+                        elif hasattr(schema, "schema"):
+                            tool_schema_json = json.dumps(schema.schema(), ensure_ascii=False)
+                        else:
+                            tool_schema_json = json.dumps(schema, ensure_ascii=False)
+                    except Exception:
+                        pass
             else:
                 # Handle LangChain tool objects
                 tool_name = str(getattr(tool, "name", "") or "")
                 tool_desc = str(getattr(tool, "description", "") or "")[:500]
+                # 获取完整的 tool schema
+                try:
+                    if hasattr(tool, "tool_schema"):
+                        schema = tool.tool_schema
+                        if isinstance(schema, dict):
+                            tool_schema_json = json.dumps(schema, ensure_ascii=False)
+                    elif hasattr(tool, "args_schema") and tool.args_schema:
+                        args_schema = tool.args_schema
+                        if hasattr(args_schema, "model_json_schema"):
+                            tool_schema_json = json.dumps(args_schema.model_json_schema(), ensure_ascii=False)
+                        elif hasattr(args_schema, "schema"):
+                            tool_schema_json = json.dumps(args_schema.schema(), ensure_ascii=False)
+                except Exception:
+                    pass
             if not tool_name:
                 continue
             self._db.execute(
                 """
-                INSERT INTO turn_tools(session_id, turn_id, tool_name, tool_description, created_at)
-                VALUES(?,?,?,?,?)
+                INSERT INTO turn_tools(session_id, turn_id, tool_name, tool_description, tool_schema, created_at)
+                VALUES(?,?,?,?,?,?)
                 """,
-                (self.session_id, turn_id, tool_name, tool_desc, now),
+                (self.session_id, turn_id, tool_name, tool_desc, tool_schema_json, now),
             )
         self._db.commit()
 
