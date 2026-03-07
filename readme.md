@@ -43,7 +43,7 @@ User Request
 run_reverse_expert_agent.py
    |
    v
-ReverseExpertAgentCore (LLM policy loop)
+StructRecoveryAgentCore (LLM policy loop)
    |                    \
    |                     \--> TaskBoard / WorkingKnowledge / ContextDistiller
    v
@@ -108,7 +108,7 @@ python3 -m venv .venv
 
 ## 7. LLM 配置
 
-项目强约束模型为 `gpt-5.2`（`run_reverse_expert_agent.py` 与 `expert_core.py` 均会校验）。
+项目强约束模型为 `gpt-5.2`（`run_reverse_expert_agent.py` 与 `struct_recovery_agent.py` / `reverse_agent_core.py` 均会校验）。
 
 ```bash
 export OPENAI_API_KEY='your-api-key-1'
@@ -144,9 +144,13 @@ python -m ida_service.daemon --host 0.0.0.0 --port 5000 --idb <IDB_PATH>
 
 ```bash
 cd /mnt/d/reverse/agentic_ida_pro
+OPENAI_API_KEY='your-api-key-1' \
+OPENAI_BASE_URL='http://192.168.72.1:8317/v1' \
+OPENAI_MODEL='gpt-5.2' \
 PYTHONPATH=src .venv/bin/python src/scripts/run_reverse_expert_agent.py \
     --ida-url http://127.0.0.1:5000 \
     --request "分析关键函数并恢复结构体定义，给出证据链" \
+    --agent-core dispatcher \
     --max-iterations 40
 ```
 
@@ -168,6 +172,7 @@ PYTHONPATH=src .venv/bin/python src/scripts/run_reverse_expert_agent.py \
 - `--request`：任务描述（必填）
 - `--ida-url`：IDA service 地址，默认 `http://127.0.0.1:5000`
 - `--max-iterations`：循环上限，默认 24
+- `--agent-core`：Agent 入口（`struct_recovery` 或 `dispatcher`，默认 `struct_recovery`）
 - `--idapython-kb-dir`：IDAPython 自修复知识库（可选）
 - `--report-dir`：报告目录（默认 `logs/agent_reports`）
 
@@ -207,7 +212,7 @@ bash src/scripts/run_ida_service.sh
 3. `inspect_symbol_usage` 获取符号读写证据  
 4. `create_structure(name, c_decl)` 创建或更新结构体  
 5. `set_identifier_type` 应用类型并重反编译  
-6. 更新任务状态与知识  
+6. 更新任务状态  
 7. 重复直到任务板闭环，再 `submit_output`
 
 ---
@@ -218,9 +223,8 @@ bash src/scripts/run_ida_service.sh
 - 证据采集：`decompile_function`, `inspect_symbol_usage`, `expand_call_path`
 - 建模：`create_structure`
 - 类型应用：`set_identifier_type`
-- 深度补证：`execute_idapython`
+- 深度补证：`run_idapython_task`
 - 任务管理：`create_task`, `set_task_status`, `get_task_board`
-- 知识沉淀：`knowledge_write`, `knowledge_read`
 - 最终提交：`submit_output`
 
 ---
