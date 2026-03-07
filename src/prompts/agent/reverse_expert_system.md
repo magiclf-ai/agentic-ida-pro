@@ -36,7 +36,7 @@
      - 栈上复合对象访问：`v4[1]`、`v4[3]`、`vxx[offset]`
    - 疑似变量由 LLM 推理；偏移/类型/大小必须优先由 `inspect_variable_accesses` 获取。
 2) `Phase-DataFlow`：
-   - 对候选指针/变量做数据流传播分析（LLM 主导，结合 `inspect_symbol_usage` 证据）。
+   - 对候选指针/变量做数据流传播分析（LLM 主导，结合 `inspect_variable_accesses` 与 `xref` 证据）。
    - 若指针进入子函数，必须追加任务并分析子函数；必要时用 `spawn_subagent(profile="function_summary_pointer_access")` 递归采证。
    - 若存在别名（如 `p0 = p1`），必须合并到同一 Alias Set 并统一结构体候选。
 3) `Phase-BuildApply`：
@@ -54,7 +54,7 @@
    - 用 `search`/`xref`/`decompile_function` 建立当前函数证据面。
    - 提取疑似结构体访问变量后，调用 `inspect_variable_accesses(function_name, variable_names)` 固化偏移/类型/大小。
 2) `COT-DataFlow`：
-   - 用 `inspect_symbol_usage` + 伪代码表达式做数据流分析。
+   - 用 `inspect_variable_accesses` + 伪代码表达式做数据流分析。
    - 跟踪参数透传、返回值传递、指针赋值、二级指针传播。
    - 发现指针进入子函数时，递归触发 `function_summary_pointer_access` 子任务并回收结果。
 3) `COT-AliasMerge`：
@@ -130,13 +130,7 @@
    - 使用方式：`function_name` 与 `ea` 二选一；必要时可用兼容参数 `name/addr`。
    - 示例：`decompile_function(function_name="sub_140045670")`
 
-8) `inspect_symbol_usage`
-   - 使用目标：追踪参数/局部/全局读写，支撑别名与数据流判断。
-   - 推荐场景：证明参数透传、指针传播、字段归属时。
-   - 使用方式：显式传 `function_name`；按需开启 `include_pseudocode`。
-   - 示例：`inspect_symbol_usage(function_name="sub_140045670", include_pseudocode=True, include_data_refs=True)`
-
-8.1) `inspect_variable_accesses`
+8) `inspect_variable_accesses`
    - 使用目标：提取指定变量的访问表达式、相对偏移、推断类型和访问大小。
    - 推荐场景：出现 `*(ptr + off)` / `v4[idx]` / 强制转换偏移访问时，需要精确偏移证据。
    - 使用方式：显式传 `function_name` 与批量变量名文本 `variable_names`。
@@ -223,7 +217,7 @@
 
 2) `run_idapython_task`（结构化工具不足时的脚本代理入口）
    - 必须调用时机：
-     - `search/xref/decompile_function/inspect_symbol_usage/inspect_variable_accesses/expand_call_path` 无法表达目标动作。
+     - `search/xref/decompile_function/inspect_variable_accesses/expand_call_path` 无法表达目标动作。
      - 需要批量采集、批量统计、复杂 API 查询或一次性补证。
    - 禁止调用时机：
      - 结构化工具可直接完成目标。

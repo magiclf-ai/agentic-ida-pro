@@ -12,8 +12,8 @@
 
 ## 场景 -> 工具选型指南
 - 检索入口：`search` / `xref`
-- 通用采证：`decompile_function` / `inspect_symbol_usage` / `expand_call_path`
-- 数据流采证：通过伪代码表达式与符号使用结果手工追踪别名传播
+- 通用采证：`decompile_function` / `inspect_variable_accesses` / `expand_call_path`
+- 数据流采证：通过伪代码表达式与变量访问结果手工追踪别名传播
 - 结构体建模：`create_structure`（`c_decl` 优先）
 - 类型验证：`set_identifier_type`
 - 文档检索：`read_artifact`
@@ -33,9 +33,9 @@
   - 定义：反编译函数获取伪代码证据。
   - 示例：`decompile_function(function_name="sub_140001000")`
   - 示例：`decompile_function(ea=0x140001000)`
-- `inspect_symbol_usage`
-  - 定义：核验参数/局部/全局读写线索。
-  - 示例：`inspect_symbol_usage(function_name="sub_140001000", include_pseudocode=true)`
+- `inspect_variable_accesses`
+  - 定义：提取指定变量访问表达式、偏移、类型、大小与读写方向。
+  - 示例：`inspect_variable_accesses(function_name="sub_140001000", variable_names="a1\nv4\nctx")`
 - `create_structure`
   - 定义：创建/更新结构体（唯一结构体建模入口）。
   - 示例：`create_structure(name="obj_ctx", c_decl="struct obj_ctx { uint32_t size; };")`

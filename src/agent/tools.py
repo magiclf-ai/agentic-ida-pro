@@ -290,7 +290,7 @@ def run_ida_script_template(
     执行 src/ida_scripts 中的模板脚本（可做 __TOKEN__ 替换 + context 注入）
 
     Args:
-        template_name: 模板文件名（相对 src/ida_scripts，例如 inspect_symbol_usage.py）
+        template_name: 模板文件名（相对 src/ida_scripts，例如 inspect_variable_accesses.py）
         variables: 替换模板中的 __TOKEN__ 变量
         context: 运行时注入脚本命名空间的变量
 
@@ -762,100 +762,6 @@ def get_database_info() -> str:
 
 
 @tool(parse_docstring=True, error_on_invalid_docstring=True)
-def inspect_symbol_usage(
-    function_name: str,
-    include_pseudocode: bool = False,
-    include_data_refs: bool = True,
-) -> str:
-    """
-    检查函数符号使用：参数/局部变量/全局变量读写/数据引用
-
-    Args:
-        function_name: 目标函数名
-        include_pseudocode: 是否返回伪代码
-        include_data_refs: 是否返回指令级数据引用
-
-    Returns:
-        符号使用报告
-    """
-    client = get_ida_client()
-    try:
-        data = client.inspect_symbol_usage(
-            function_name=function_name,
-            include_pseudocode=include_pseudocode,
-            include_data_refs=include_data_refs,
-        )
-        symbol_map: Dict[str, Dict[str, str]] = {}
-
-        def _add_symbol(sym_name: Any, sym_type: Any, expr: Any) -> None:
-            name_text = str(sym_name or "").strip()
-            kind_text = str(sym_type or "").strip().lower()
-            expr_text = str(expr or "").strip()
-            if not name_text or kind_text not in {"function", "global", "local"}:
-                return
-            key = f"{kind_text}:{name_text}"
-            if key in symbol_map:
-                return
-            symbol_map[key] = {
-                "name": name_text,
-                "type": kind_text,
-                "expr": expr_text,
-            }
-
-        for row in (data.get("global_reads", []) or []):
-            _add_symbol(
-                row.get("name", ""),
-                row.get("symbol_type", "global"),
-                row.get("expr", ""),
-            )
-        for row in (data.get("global_writes", []) or []):
-            _add_symbol(
-                row.get("name", ""),
-                row.get("symbol_type", "global"),
-                row.get("expr", ""),
-            )
-        for row in (data.get("local_reads", []) or []):
-            _add_symbol(
-                row.get("var", ""),
-                "local",
-                row.get("expr", ""),
-            )
-        for row in (data.get("local_writes", []) or []):
-            _add_symbol(
-                row.get("var", ""),
-                "local",
-                row.get("expr", ""),
-            )
-        for row in (data.get("function_calls", []) or []):
-            _add_symbol(
-                row.get("name", ""),
-                "function",
-                row.get("expr", ""),
-            )
-
-        rows = list(symbol_map.values())
-        type_order = {"function": 0, "global": 1, "local": 2}
-        rows.sort(key=lambda item: (type_order.get(item.get("type", ""), 9), item.get("name", "")))
-        if not rows:
-            return f"Symbol usage for '{function_name}':\n(empty)"
-
-        lines = [f"Symbol usage for '{function_name}':"]
-        for row in rows:
-            expr = str(row.get("expr", "") or "").strip()
-            if expr:
-                lines.append(
-                    f"- {row.get('name', '')}, type: {row.get('type', '')}, expr: {expr}"
-                )
-            else:
-                lines.append(
-                    f"- {row.get('name', '')}, type: {row.get('type', '')}"
-                )
-        return "\n".join(lines)
-    except Exception as e:
-        return f"ERROR: inspecting symbol usage failed: {str(e)}"
-
-
-@tool(parse_docstring=True, error_on_invalid_docstring=True)
 def inspect_variable_accesses(
     function_name: str,
     variable_names: str,
@@ -1303,7 +1209,6 @@ CORE_TOOLS = [
     decompile_function,
     search,
     xref,
-    inspect_symbol_usage,
     inspect_variable_accesses,
     create_structure,
     set_identifier_type,

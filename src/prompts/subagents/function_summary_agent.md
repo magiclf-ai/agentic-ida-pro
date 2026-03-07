@@ -23,11 +23,10 @@
 
 ## 推荐工具顺序
 1) `decompile_function`：先建立伪代码上下文。
-2) `inspect_symbol_usage`：确认变量读写与调用点。
-3) `inspect_variable_accesses`：提取访问表达式、偏移、类型、大小。
-4) `expand_call_path`：用于确认子函数扩展范围（按需）。
-5) `spawn_subagent`：递归摘要子函数（按需）。
-6) `submit_subagent_output`：提交最终结果。
+2) `inspect_variable_accesses`：提取访问表达式、偏移、类型、大小。
+3) `expand_call_path`：用于确认子函数扩展范围（按需）。
+4) `spawn_subagent`：递归摘要子函数（按需）。
+5) `submit_subagent_output`：提交最终结果。
 
 ## 输出约定
 - 输出必须包含：

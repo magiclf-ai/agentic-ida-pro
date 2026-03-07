@@ -16,7 +16,7 @@
 核心场景：
 
 - 入口与热点函数定位（`search` / `xref`）
-- 关键函数伪代码证据采集（`decompile_function` / `inspect_symbol_usage`）
+- 关键函数伪代码证据采集（`decompile_function` / `inspect_variable_accesses`）
 - 结构体创建与迭代（`create_structure`）
 - 类型应用与重反编译验证（`set_identifier_type`）
 - 任务闭环与证据链输出（`create_task` / `set_task_status` / `submit_output`）
@@ -209,7 +209,7 @@ bash src/scripts/run_ida_service.sh
 
 1. `search` / `xref` 缩小函数范围  
 2. `decompile_function` 获取伪代码  
-3. `inspect_symbol_usage` 获取符号读写证据  
+3. `inspect_variable_accesses` 获取变量访问与偏移证据  
 4. `create_structure(name, c_decl)` 创建或更新结构体  
 5. `set_identifier_type` 应用类型并重反编译  
 6. 更新任务状态  
@@ -220,7 +220,7 @@ bash src/scripts/run_ida_service.sh
 ## 11. 主要工具
 
 - 检索：`search`, `xref`
-- 证据采集：`decompile_function`, `inspect_symbol_usage`, `expand_call_path`
+- 证据采集：`decompile_function`, `inspect_variable_accesses`, `expand_call_path`
 - 建模：`create_structure`
 - 类型应用：`set_identifier_type`
 - 深度补证：`run_idapython_task`
@@ -315,8 +315,8 @@ logs/agent_sessions/agent_observability.sqlite3
 快速烟测：
 
 ```bash
-PYTHONPATH=src .venv/bin/python src/scripts/test_ida_service_endpoints.py \
-  --base-url http://127.0.0.1:5000
+curl -fsS http://127.0.0.1:5000/health
+curl -fsS http://127.0.0.1:5000/db/info
 ```
 
 ---

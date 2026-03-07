@@ -467,36 +467,6 @@ else:
             raise Exception(f"Unexpected /xrefs payload type: {type(data).__name__}")
         raise Exception(result.get("error", "Failed to search xrefs"))
 
-    def inspect_symbol_usage(
-        self,
-        function_name: str,
-        include_pseudocode: bool = False,
-        include_data_refs: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        检查函数符号使用：参数/局部变量/全局变量读写/数据引用
-
-        Args:
-            function_name: 目标函数名
-            include_pseudocode: 是否返回伪代码
-            include_data_refs: 是否返回指令级数据引用
-        """
-        script = self._render_script_template(
-            "inspect_symbol_usage.py",
-            {
-                "FUNCTION_NAME": str(function_name),
-                "INCLUDE_PSEUDOCODE": bool(include_pseudocode),
-                "INCLUDE_DATA_REFS": bool(include_data_refs),
-            },
-        )
-        result = self.execute_script(script=script)
-        if result.get("success"):
-            payload = result.get("result")
-            if isinstance(payload, dict):
-                return payload
-            raise Exception(f"Unexpected inspect_symbol_usage payload type: {type(payload).__name__}")
-        raise Exception(result.get("stderr") or result.get("error") or "Failed to inspect symbol usage")
-
     def inspect_variable_accesses(
         self,
         function_name: str,
