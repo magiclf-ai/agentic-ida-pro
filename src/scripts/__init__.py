@@ -1,1 +1,0 @@
-"""Scripts helpers package."""

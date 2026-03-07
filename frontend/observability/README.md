@@ -91,7 +91,7 @@ cd /mnt/d/reverse/agentic_ida_pro
 
 ```bash
 cd /mnt/d/reverse/agentic_ida_pro
-PYTHONPATH=src .venv/bin/python src/scripts/logs.py --host 0.0.0.0 --port 8765
+PYTHONPATH=src .venv/bin/python src/entrypoints/logs.py --host 0.0.0.0 --port 8765
 ```
 
 ### 2. 启动前端

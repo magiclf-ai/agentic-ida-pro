@@ -33,5 +33,5 @@ SCRIPT_TIMEOUT = int(os.getenv("IDA_SCRIPT_TIMEOUT", "60"))
 # IDA 安装路径（可选，用于自动检测）
 IDA_INSTALL_PATH = os.getenv("IDA_INSTALL_PATH", "")
 
-# 启动时默认打开数据库
-DEFAULT_IDB_PATH = os.getenv("IDA_DEFAULT_IDB_PATH", "")
+# 启动时默认打开输入（binary 或 IDB）
+DEFAULT_INPUT_PATH = os.getenv("IDA_DEFAULT_INPUT_PATH", "")

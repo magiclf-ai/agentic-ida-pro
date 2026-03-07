@@ -3,20 +3,20 @@
 统一启动可观测性系统（前端 + 后端）
 
 用法:
-    python src/scripts/start_observability.py [options]
+    python src/entrypoints/observability_stack.py [options]
 
 示例:
     # 默认启动（后端 8765，前端 5173）
-    python src/scripts/start_observability.py
+    python src/entrypoints/observability_stack.py
     
     # 指定端口
-    python src/scripts/start_observability.py --api-port 8080 --ui-port 3000
+    python src/entrypoints/observability_stack.py --api-port 8080 --ui-port 3000
     
     # 只启动后端
-    python src/scripts/start_observability.py --backend-only
+    python src/entrypoints/observability_stack.py --backend-only
     
     # 只启动前端
-    python src/scripts/start_observability.py --frontend-only
+    python src/entrypoints/observability_stack.py --frontend-only
 """
 
 import argparse
@@ -97,7 +97,7 @@ def start_backend(host: str, port: int, db_path: str = None, reload: bool = True
     cmd = [
         sys.executable,
         "-u",  # unbuffered 输出，确保日志实时显示
-        str(PROJECT_ROOT / "src" / "scripts" / "logs.py"),
+        str(PROJECT_ROOT / "src" / "entrypoints" / "logs.py"),
         "--host", host,
         "--port", str(port),
         "--no-open-browser",

@@ -8,7 +8,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from scripts.serve_observability_api import serve_observability_api
+from entrypoints.observability_api import serve_observability_api
 
 
 def _build_parser() -> argparse.ArgumentParser:

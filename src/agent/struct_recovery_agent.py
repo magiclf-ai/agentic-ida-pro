@@ -183,6 +183,7 @@ class StructRecoveryRuntimeCore:
 
         self.session_logger: Optional[AgentSessionLogger] = None
         self.obs = ObservabilityHub(None, debug_enabled=self._debug_enabled())
+        self.enable_llm_console_log = self._llm_console_logging_enabled()
         self.last_session_id: Optional[str] = None
         self.session_db_path: Optional[str] = None
 
@@ -217,6 +218,51 @@ class StructRecoveryRuntimeCore:
     def _debug_enabled(self) -> bool:
         value = str(os.getenv("AGENT_DEBUG", os.getenv("AGENT_DEBUG_TRACE", "0"))).strip().lower()
         return value in {"1", "true", "yes", "on"}
+
+    def _llm_console_logging_enabled(self) -> bool:
+        value = str(os.getenv("AGENT_LLM_LOG_STDOUT", "1")).strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _print_llm_request(self, *, turn_id: str, agent_id: str, iteration: int, messages_count: int) -> None:
+        if not self.enable_llm_console_log:
+            return
+        print(
+            f"[LLM] request turn={turn_id} agent={agent_id} iter={int(iteration)} "
+            f"messages={int(messages_count)} model={self.model}"
+        )
+
+    def _print_llm_response(
+        self,
+        *,
+        turn_id: str,
+        agent_id: str,
+        iteration: int,
+        response_text: str,
+        tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        if not self.enable_llm_console_log:
+            return
+        text = str(response_text or "")
+        preview = AgentUtils.truncate(" ".join(text.split()), 220)
+        names: List[str] = []
+        for row in tool_calls[:6]:
+            names.append(str(row.get("name", "") or "unknown"))
+        tools_preview = ",".join(names) if names else "-"
+        if len(tool_calls) > 6:
+            tools_preview += ",..."
+        print(
+            f"[LLM] response turn={turn_id} agent={agent_id} iter={int(iteration)} "
+            f"tool_calls={len(tool_calls)} tools={tools_preview} "
+            f"content_chars={len(text)} preview={preview}"
+        )
+
+    def _print_llm_error(self, *, turn_id: str, agent_id: str, iteration: int, error_text: str) -> None:
+        if not self.enable_llm_console_log:
+            return
+        print(
+            f"[LLM] error turn={turn_id} agent={agent_id} iter={int(iteration)} "
+            f"error={AgentUtils.truncate(str(error_text or ''), 280)}"
+        )
 
     def _init_session_logger(self) -> None:
         if not self.enable_session_log:
@@ -1665,9 +1711,21 @@ class StructRecoveryRuntimeCore:
             )
 
             interaction_started = time.perf_counter()
+            self._print_llm_request(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                iteration=iteration,
+                messages_count=len(messages),
+            )
             try:
                 response = await self._ainvoke_with_retry(llm_with_tools, messages, max_retries=self.llm_max_retries)
             except Exception as e:
+                self._print_llm_error(
+                    turn_id=turn_id,
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    error_text=str(e),
+                )
                 self.obs.emit(
                     "llm_response_failed",
                     {
@@ -1681,6 +1739,13 @@ class StructRecoveryRuntimeCore:
             response_content = getattr(response, "content", "") or ""
             response_text = AgentUtils.content_to_text(response_content)
             tool_calls = self._normalize_tool_calls(getattr(response, "tool_calls", None), turn_id=turn_id)
+            self._print_llm_response(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                iteration=iteration,
+                response_text=response_text,
+                tool_calls=tool_calls,
+            )
             self.policy_mgr.append_message(
                 messages=messages,
                 message_obj=AIMessage(content=response_text, tool_calls=tool_calls),

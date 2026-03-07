@@ -86,14 +86,51 @@ class IDAClient:
         response.raise_for_status()
         return response.json()
     
-    def open_database(self, db_path: str) -> Dict[str, Any]:
+    def open_database(
+        self,
+        input_path: str,
+        run_auto_analysis: bool = True,
+        save_current: bool = True,
+    ) -> Dict[str, Any]:
         """
-        已弃用：数据库应在服务启动时通过 --idb 打开。
+        运行时打开数据库；如果当前已打开其他数据库，可自动保存并切换。
         """
-        raise RuntimeError(
-            "open_database endpoint is removed. "
-            "Start IDA Service with --idb (or IDA_DEFAULT_IDB_PATH) instead."
+        payload = {
+            "input_path": str(input_path or "").strip(),
+            "run_auto_analysis": bool(run_auto_analysis),
+            "save_current": bool(save_current),
+        }
+        response = requests.post(
+            f"{self.base_url}/db/open",
+            json=payload,
+            timeout=self.timeout,
         )
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("success"):
+            raise Exception(result.get("error", "open_database request failed"))
+        data = result.get("result")
+        if not isinstance(data, dict):
+            raise Exception(f"Unexpected open_database payload type: {type(data).__name__}")
+        return data
+
+    def close_database(self, save: bool = True) -> Dict[str, Any]:
+        """
+        运行时关闭当前数据库。
+        """
+        response = requests.post(
+            f"{self.base_url}/db/close",
+            json={"save": bool(save)},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("success"):
+            raise Exception(result.get("error", "close_database request failed"))
+        data = result.get("result")
+        if not isinstance(data, dict):
+            raise Exception(f"Unexpected close_database payload type: {type(data).__name__}")
+        return data
     
     def get_db_info(self) -> Dict[str, Any]:
         """获取当前数据库信息"""

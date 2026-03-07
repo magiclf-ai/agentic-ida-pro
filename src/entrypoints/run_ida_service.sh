@@ -8,7 +8,7 @@ IDA_DEBUG_MODE="${IDA_DEBUG_MODE:-false}"
 IDA_LOG_LEVEL="${IDA_LOG_LEVEL:-INFO}"
 IDA_LOG_DIR="${IDA_LOG_DIR:-$(pwd)/logs}"
 IDA_DEBUG_SCRIPT_DIR="${IDA_DEBUG_SCRIPT_DIR:-$(pwd)/logs/scripts}"
-IDA_DEFAULT_IDB_PATH="${IDA_DEFAULT_IDB_PATH:-}"
+IDA_DEFAULT_INPUT_PATH="${IDA_DEFAULT_INPUT_PATH:-}"
 
 # 创建日志目录
 mkdir -p "$IDA_LOG_DIR"
@@ -25,8 +25,8 @@ echo "Port: $IDA_SERVICE_PORT"
 echo "Debug Mode: $IDA_DEBUG_MODE"
 echo "Log Level: $IDA_LOG_LEVEL"
 echo "Log Directory: $IDA_LOG_DIR"
-if [ -n "$IDA_DEFAULT_IDB_PATH" ]; then
-    echo "Default IDB: $IDA_DEFAULT_IDB_PATH"
+if [ -n "$IDA_DEFAULT_INPUT_PATH" ]; then
+    echo "Default Input: $IDA_DEFAULT_INPUT_PATH"
 fi
 echo "=================================================="
 echo ""
@@ -38,19 +38,23 @@ export IDA_DEBUG_MODE
 export IDA_LOG_LEVEL
 export IDA_LOG_DIR
 export IDA_DEBUG_SCRIPT_DIR
-export IDA_DEFAULT_IDB_PATH
-
-# 需要在服务启动时打开数据库
-if [ -z "$IDA_DEFAULT_IDB_PATH" ]; then
-    echo "[ERROR] IDA_DEFAULT_IDB_PATH is empty. Please provide an IDB/I64 path."
-    exit 1
-fi
+export IDA_DEFAULT_INPUT_PATH
 
 # 确保能导入 src/ 下模块
 export PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # 启动服务
-python3 -m ida_service.main \
-    --host "$IDA_SERVICE_HOST" \
-    --port "$IDA_SERVICE_PORT" \
-    --idb "$IDA_DEFAULT_IDB_PATH"
+CMD=(
+    python3 -m ida_service.main
+    --host "$IDA_SERVICE_HOST"
+    --port "$IDA_SERVICE_PORT"
+)
+
+if [ -n "$IDA_DEFAULT_INPUT_PATH" ]; then
+    CMD+=(--input-path "$IDA_DEFAULT_INPUT_PATH")
+else
+    echo "[INFO] IDA_DEFAULT_INPUT_PATH is empty; service will start without opening input."
+    echo "[INFO] Use /db/open API to open binary or IDB later."
+fi
+
+"${CMD[@]}"

@@ -21,6 +21,7 @@ from agent.struct_recovery_agent import StructRecoveryAgentCore
 
 
 REQUIRED_MODEL = "gpt-5.2"
+DEFAULT_REPORT_DIR = os.path.join(project_root, "..", "logs", "agent_reports")
 
 
 async def _snapshot_structs(agent: Any) -> Dict[str, Any]:
@@ -351,7 +352,7 @@ def _build_acceptance_summary_markdown(
     return "\n".join(lines) + "\n"
 
 
-async def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run reverse expert agent with acceptance report")
     parser.add_argument("--request", required=True, help="Text reverse-analysis request")
     parser.add_argument("--ida-url", default="http://127.0.0.1:5000", help="IDA service URL")
@@ -369,10 +370,13 @@ async def main() -> int:
     )
     parser.add_argument(
         "--report-dir",
-        default=os.path.join(project_root, "..", "logs", "agent_reports"),
+        default=DEFAULT_REPORT_DIR,
         help="Directory to write compare report artifacts",
     )
-    args = parser.parse_args()
+    return parser
+
+
+async def run_from_namespace(args: argparse.Namespace) -> int:
 
     model = str(os.getenv("OPENAI_MODEL", REQUIRED_MODEL)).strip()
     if model != REQUIRED_MODEL:
@@ -665,5 +669,10 @@ async def main() -> int:
     return 0
 
 
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    return int(asyncio.run(run_from_namespace(args)))
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(main())

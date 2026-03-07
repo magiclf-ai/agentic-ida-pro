@@ -17,4 +17,4 @@ if [ ! -f "$PYTHON" ]; then
 fi
 
 # 执行启动脚本
-exec "$PYTHON" "$PROJECT_ROOT/src/scripts/start_observability.py" "$@"
+exec "$PYTHON" "$PROJECT_ROOT/src/entrypoints/observability_stack.py" "$@"

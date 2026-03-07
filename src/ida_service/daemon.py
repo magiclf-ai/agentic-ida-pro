@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 IDA Service Daemon
-- 启动时打开数据库
+- 支持运行时打开/关闭数据库
 - 串行执行所有 IDA 脚本（主线程约束）
 """
 import argparse
@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from flask import Flask, jsonify, request
 
@@ -43,7 +43,7 @@ except ImportError:
 app = Flask(__name__)
 logger = logging.getLogger("ida_service")
 _exec_lock = threading.RLock()
-_db_state: Dict[str, Optional[str]] = {
+_db_state: Dict[str, Any] = {
     "opened": False,
     "path": None,
     "opened_at": None,
@@ -101,31 +101,150 @@ def _execute_serialized(code: str, context: Optional[Dict] = None) -> Tuple[Dict
 def _require_db_opened():
     if not _db_state["opened"]:
         return (
-            jsonify({"success": False, "error": "Database not opened. Restart service with --idb."}),
+            jsonify({"success": False, "error": "Database not opened. Call /db/open first."}),
             503,
         )
     return None
 
 
-def _open_database_on_startup(db_path: str):
-    """启动时打开数据库，失败则抛异常。"""
-    if not db_path:
-        raise RuntimeError("Missing IDB path. Please pass --idb or set IDA_DEFAULT_IDB_PATH.")
+def _normalize_path(path: str) -> str:
+    return os.path.abspath(str(path or "").strip())
 
-    if not os.path.exists(db_path):
-        raise RuntimeError(f"IDB file not found: {db_path}")
+
+def _set_db_opened(path: str):
+    _db_state["opened"] = True
+    _db_state["path"] = str(path or "").strip()
+    _db_state["opened_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _set_db_closed():
+    _db_state["opened"] = False
+    _db_state["path"] = None
+    _db_state["opened_at"] = None
+
+
+def _cleanup_unpacked_idb_files_in_dir(input_path: str) -> Dict[str, Any]:
+    directory = os.path.dirname(_normalize_path(input_path))
+    if not directory:
+        directory = "."
+    if not os.path.isdir(directory):
+        return {"directory": directory, "deleted_count": 0, "deleted_files": []}
+
+    targets = (".id0", ".id1", ".id2", ".nam", ".til")
+    deleted_files = []
+    for name in os.listdir(directory):
+        lower = str(name).lower()
+        if not lower.endswith(targets):
+            continue
+        full_path = os.path.join(directory, name)
+        if not os.path.isfile(full_path):
+            continue
+        try:
+            os.remove(full_path)
+            deleted_files.append(full_path)
+        except Exception as e:
+            logger.warning("Failed to delete unpacked file: %s (%s)", full_path, e)
+    if deleted_files:
+        logger.info("Deleted %d unpacked IDB sidecar files in %s", len(deleted_files), directory)
+    return {"directory": directory, "deleted_count": len(deleted_files), "deleted_files": deleted_files}
+
+
+def _close_database_locked(save: bool = True) -> Dict[str, Any]:
+    if not _check_ida_available():
+        raise RuntimeError("IDA modules unavailable")
+
+    if not _db_state["opened"]:
+        return {
+            "already_closed": True,
+            "closed_path": "",
+            "saved": bool(save),
+        }
+
+    started = time.time()
+    closed_path = str(idc.get_idb_path() or _db_state.get("path") or "").strip()
+    idapro.close_database(bool(save))
+    _set_db_closed()
+    elapsed = time.time() - started
+    logger.info("Database closed in %.2fs: %s (saved=%s)", elapsed, closed_path or "unknown", bool(save))
+    return {
+        "already_closed": False,
+        "closed_path": closed_path,
+        "saved": bool(save),
+    }
+
+
+def _open_database_locked(
+    input_path: str,
+    run_auto_analysis: bool = True,
+    save_current: bool = True,
+) -> Dict[str, Any]:
+    if not _check_ida_available():
+        raise RuntimeError("IDA modules unavailable")
+
+    if not input_path:
+        raise RuntimeError("Missing input path.")
+
+    normalized_path = _normalize_path(input_path)
+    if not os.path.exists(normalized_path):
+        raise RuntimeError(f"Input file not found: {normalized_path}")
+
+    switched_from = ""
+    close_result = None
+    already_open = False
+
+    if _db_state["opened"]:
+        current_path = str(idc.get_idb_path() or _db_state.get("path") or "").strip()
+        if current_path and _normalize_path(current_path) == normalized_path:
+            already_open = True
+        else:
+            switched_from = current_path
+            close_result = _close_database_locked(save=bool(save_current))
+
+    if already_open:
+        return {
+            "path": str(_db_state.get("path") or ""),
+            "opened_at": str(_db_state.get("opened_at") or ""),
+            "already_open": True,
+            "switched_from": "",
+            "close_result": None,
+            "cleanup_result": {"directory": os.path.dirname(normalized_path), "deleted_count": 0, "deleted_files": []},
+        }
+
+    cleanup_result = _cleanup_unpacked_idb_files_in_dir(normalized_path)
+    started = time.time()
+    open_ret = idapro.open_database(normalized_path, bool(run_auto_analysis))
+    if bool(open_ret):
+        raise RuntimeError(f"idapro.open_database failed with code: {open_ret}")
+    active_path = str(idc.get_idb_path() or normalized_path).strip()
+    _set_db_opened(active_path)
+    elapsed = time.time() - started
+    logger.info(
+        "Database opened in %.2fs: %s (run_auto_analysis=%s)",
+        elapsed,
+        active_path,
+        bool(run_auto_analysis),
+    )
+    return {
+        "path": active_path,
+        "opened_at": str(_db_state.get("opened_at") or ""),
+        "already_open": False,
+        "switched_from": switched_from,
+        "close_result": close_result,
+        "cleanup_result": cleanup_result,
+    }
+
+
+def _open_database_on_startup(input_path: str):
+    """启动时可选打开数据库。"""
+    if not str(input_path or "").strip():
+        logger.info("No startup input configured. Use /db/open to open binary or IDB later.")
+        return
 
     with _exec_lock:
-        started = time.time()
         try:
-            idapro.open_database(db_path, True)
-            _db_state["opened"] = True
-            _db_state["path"] = idc.get_idb_path() or db_path
-            _db_state["opened_at"] = datetime.now(timezone.utc).isoformat()
-            elapsed = time.time() - started
-            logger.info("Database opened in %.2fs: %s", elapsed, _db_state["path"])
+            _open_database_locked(input_path=input_path, run_auto_analysis=True, save_current=True)
         except Exception as e:
-            raise RuntimeError(f"Failed to open database: {e}")
+            raise RuntimeError(f"Failed to open database on startup: {e}")
 
 
 @app.route("/health", methods=["GET"])
@@ -137,8 +256,44 @@ def health_check():
             "has_ida": _check_ida_available(),
             "db_opened": _db_state["opened"],
             "db_path": _db_state["path"],
+            "db_opened_at": _db_state["opened_at"],
         }
     )
+
+
+@app.route("/db/open", methods=["POST"])
+def open_db():
+    data = request.json or {}
+    input_path = str(data.get("input_path", "") or "").strip()
+    run_auto_analysis = bool(data.get("run_auto_analysis", True))
+    save_current = bool(data.get("save_current", True))
+
+    if not input_path:
+        return jsonify({"success": False, "error": "Missing 'input_path' field"}), 400
+
+    with _exec_lock:
+        try:
+            result = _open_database_locked(
+                input_path=input_path,
+                run_auto_analysis=run_auto_analysis,
+                save_current=save_current,
+            )
+            return jsonify({"success": True, "result": result})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/db/close", methods=["POST"])
+def close_db():
+    data = request.json or {}
+    save = bool(data.get("save", True))
+
+    with _exec_lock:
+        try:
+            result = _close_database_locked(save=save)
+            return jsonify({"success": True, "result": result})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
 
 
 @app.route("/db/info", methods=["GET"])
@@ -415,7 +570,7 @@ def main():
     parser.add_argument("--host", default=config.HOST, help="Server host")
     parser.add_argument("--port", type=int, default=config.PORT, help="Server port")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--idb", help="IDB path to open on startup")
+    parser.add_argument("--input-path", help="Binary or IDB path to open on startup")
     parser.add_argument("--log-dir", default=config.LOG_DIR, help="Log directory")
 
     args = parser.parse_args()
@@ -440,8 +595,8 @@ def main():
     if not _check_ida_available():
         logger.warning("Running in mock mode (IDA modules unavailable)")
     else:
-        idb_path = args.idb or config.DEFAULT_IDB_PATH
-        _open_database_on_startup(idb_path)
+        input_path = args.input_path or config.DEFAULT_INPUT_PATH
+        _open_database_on_startup(str(input_path or ""))
 
     logger.info("Starting server...")
     app.run(

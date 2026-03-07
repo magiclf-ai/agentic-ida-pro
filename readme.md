@@ -40,7 +40,7 @@
 User Request
    |
    v
-run_reverse_expert_agent.py
+reverse_expert.py
    |
    v
 StructRecoveryAgentCore (LLM policy loop)
@@ -70,11 +70,10 @@ IDB / Hex-Rays / IDA APIs
 │   ├── ida_service/               # IDA HTTP 服务（在 IDA 进程内运行）
 │   ├── ida_scripts/               # 可复用 IDAPython 模板
 │   ├── prompts/                   # 系统提示词与子 Agent 提示词
-│   ├── scripts/                   # 启动脚本、桥接脚本、验收脚本
+│   ├── entrypoints/               # 启动入口、服务入口、验收入口
 │   └── skills/                    # 技能定义（struct_recovery/function_analysis/string_decrypt）
 ├── frontend/observability/        # 可观测性前端 (Vue)
 ├── logs/                          # 会话日志、报告产物
-├── runtime/                       # 运行时控制文件（如 bridge 控制文件）
 └── test_binaries/                 # 示例二进制/IDB（含 suite_v2 复杂样例）
 ```
 
@@ -108,7 +107,7 @@ python3 -m venv .venv
 
 ## 7. LLM 配置
 
-项目强约束模型为 `gpt-5.2`（`run_reverse_expert_agent.py` 与 `struct_recovery_agent.py` / `reverse_agent_core.py` 均会校验）。
+项目强约束模型为 `gpt-5.2`（`reverse_expert.py` 与 `struct_recovery_agent.py` / `reverse_agent_core.py` 均会校验）。
 
 ```bash
 export OPENAI_API_KEY='your-api-key-1'
@@ -120,45 +119,41 @@ export OPENAI_MODEL='gpt-5.2'
 
 ## 8. 运行方式（发布版推荐）
 
-### 8.1 启动 IDA Service（Windows 侧）
-
-1) 修改 `src/scripts/run_windows_bridge.bat` 里的 IDB 路径：
-
-```bat
-set IDB_PATH=D:\reverse\agentic_ida_pro\test_binaries\complex_test.i64
-```
-
-2) 在 **Windows CMD** 执行：
-
-```bat
-.\src\scripts\run_windows_bridge.bat
-```
-
-该脚本会启动 `service_bridge.py watch`，并拉起：
-
-```text
-python -m ida_service.daemon --host 0.0.0.0 --port 5000 --idb <IDB_PATH>
-```
-
-### 8.2 启动 Agent（WSL/Linux 侧）
+### 8.1 一体化入口（推荐）
 
 ```bash
 cd /mnt/d/reverse/agentic_ida_pro
 OPENAI_API_KEY='your-api-key-1' \
 OPENAI_BASE_URL='http://192.168.72.1:8317/v1' \
 OPENAI_MODEL='gpt-5.2' \
-PYTHONPATH=src .venv/bin/python src/scripts/run_reverse_expert_agent.py \
-    --ida-url http://127.0.0.1:5000 \
+PYTHONPATH=src .venv/bin/python reverse_agent.py \
+    --input-path /abs/path/to/target.i64 \
     --request "分析关键函数并恢复结构体定义，给出证据链" \
     --agent-core dispatcher \
     --max-iterations 40
 ```
 
+该入口会：
+
+- 子进程启动 `ida_service.daemon`
+- 调用 `/db/open` 打开目标二进制或 IDB
+- 启动并等待 `reverse_expert.py`
+- 结束时调用 `/db/close`（默认保存）并回收 service 进程
+
+### 8.2 仅启动 IDA Service（可选）
+
+```bash
+cd /mnt/d/reverse/agentic_ida_pro
+bash src/entrypoints/run_ida_service.sh
+```
+
+若设置 `IDA_DEFAULT_INPUT_PATH`，service 启动时会自动打开；未设置时可后续调用 `/db/open`。
+
 ---
 
 ## 9. 关键脚本说明
 
-### 9.1 `src/scripts/run_reverse_expert_agent.py`
+### 9.1 `src/entrypoints/reverse_expert.py`
 
 职责：
 
@@ -176,29 +171,35 @@ PYTHONPATH=src .venv/bin/python src/scripts/run_reverse_expert_agent.py \
 - `--idapython-kb-dir`：IDAPython 自修复知识库（可选）
 - `--report-dir`：报告目录（默认 `logs/agent_reports`）
 
-### 9.2 `src/scripts/service_bridge.py`
+### 9.2 `reverse_agent.py`（根目录入口）
 
 职责：
 
-- `watch`：Windows 侧常驻，接收重启请求并重拉 ida_service
-- `request`：WSL 侧请求 bridge 重启服务
+- 根路径统一入口，调用 `src/entrypoints/reverse_agent_service.py`
+- 对外保持简洁启动命令，不暴露内部脚本层级
 
-WSL 请求重启示例：
+### 9.3 `src/entrypoints/reverse_agent_service.py`（内部实现）
+
+职责：
+
+- 统一入口：拉起 `ida_service` 子进程并等待健康检查
+- 调用 `open_database`/`close_database` 动态开关 IDB
+- 在当前进程直接调用 `reverse_expert` 能力（不再脚本子进程嵌套）
+
+常用参数：
+
+- `--input-path`：目标二进制或 IDB 路径（必填）
+- `--request`：逆向任务描述（必填）
+- `--ida-host/--ida-port`：service 绑定地址
+- `--no-save-on-exit`：退出时关闭数据库不保存
+
+### 9.4 `src/entrypoints/run_ida_service.sh`（纯 Linux 方案）
+
+如果只想单独启动 service，可直接：
 
 ```bash
-PYTHONPATH=src .venv/bin/python src/scripts/service_bridge.py request \
-  --control-file runtime/ida_service_control.json \
-  --reason "ida_service_code_changed" \
-  --wait
-```
-
-### 9.3 `src/scripts/run_ida_service.sh`（纯 Linux 方案）
-
-如果不走 Windows bridge，可直接：
-
-```bash
-export IDA_DEFAULT_IDB_PATH=/abs/path/to/target.i64
-bash src/scripts/run_ida_service.sh
+export IDA_DEFAULT_INPUT_PATH=/abs/path/to/target.i64
+bash src/entrypoints/run_ida_service.sh
 ```
 
 ---
@@ -268,7 +269,7 @@ logs/agent_sessions/agent_observability.sqlite3
 
 ---
 
-## 13. 验收机制（run_reverse_expert_agent）
+## 13. 验收机制（reverse_expert）
 
 脚本会在结束时执行自动验收，典型失败条件：
 
@@ -295,7 +296,7 @@ logs/agent_sessions/agent_observability.sqlite3
 - 后端：`http://127.0.0.1:8765`
 
 前端目录：`frontend/observability`  
-后端入口：`src/scripts/logs.py`
+后端入口：`src/entrypoints/logs.py`
 
 ---
 
@@ -304,6 +305,8 @@ logs/agent_sessions/agent_observability.sqlite3
 核心端点：
 
 - `GET /health`
+- `POST /db/open`
+- `POST /db/close`
 - `GET /db/info`
 - `POST /db/backup`
 - `POST /execute`
@@ -354,15 +357,18 @@ curl -fsS http://127.0.0.1:5000/db/info
 
 ### Q3: IDA service 返回 `Database not opened`
 
-原因：启动 service 时未传 `--idb` 或路径无效。  
-处理：检查 `run_windows_bridge.bat` 的 `IDB_PATH` 或 `IDA_DEFAULT_IDB_PATH`。
+原因：当前未打开任何 IDB。  
+处理：调用 `POST /db/open`，或在一体化入口中通过 `--input-path` 自动打开。
 
-### Q4: WSL 里直接执行 `.bat` 失败
+### Q4: 如何切换到另一个 IDB
 
-原因：`.bat` 需在 Windows CMD/PowerShell 运行。  
-处理：在 Windows 终端执行 `.\src\scripts\run_windows_bridge.bat`。
+处理：调用 `POST /db/open` 并传新路径，服务会默认保存关闭当前数据库后再打开新数据库。
 
-### Q5: 前端启动失败（npm）
+### Q5: 打开目标前为何会删除 `.id0/.id1/.id2/.nam/.til`
+
+处理：这是默认清理逻辑。每次 `open` 前会清理目标目录下这些未打包数据库碎片文件，避免旧文件干扰当前分析数据库。
+
+### Q6: 前端启动失败（npm）
 
 处理：
 
