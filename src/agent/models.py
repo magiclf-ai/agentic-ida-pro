@@ -17,21 +17,6 @@ class WorkingKnowledge:
 
 
 @dataclass
-class ContextMessageRow:
-    """Context message row for tracking conversation history."""
-    message_id: str
-    role: str
-    source: str
-    content: str
-    turn_id: str
-    agent_id: str
-    created_at: float
-    pinned: bool = False
-    pruned: bool = False
-    folded: bool = False
-
-
-@dataclass
 class PolicyMessageRef:
     """Reference to a policy message in the conversation."""
     message_id: str

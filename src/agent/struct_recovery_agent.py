@@ -13,11 +13,10 @@ from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
 
 from .context_distiller import ContextDistillerAgent
-from .context_manager import ContextManager
 from .ida_client import IDAClient
 from .idapython_agent import IDAPythonTaskAgent
 from .knowledge_manager import KnowledgeManager
-from .models import ContextMessageRow, PolicyMessageRef
+from .models import PolicyMessageRef
 from .observability import ObservabilityHub
 from .policy_manager import PolicyManager
 from .prompt_manager import PromptManager
@@ -153,7 +152,6 @@ class StructRecoveryRuntimeCore:
         self.expert_tools: List[Any] = []
         self.expert_tool_map: Dict[str, Any] = {}
 
-        self.context_window_messages = 120
         self.subagent_max_context_chars = 3200
         self.subagent_max_parallel = 4
         self.policy_history_max_messages = 220
@@ -195,7 +193,6 @@ class StructRecoveryRuntimeCore:
         # Initialize managers
         self.knowledge_mgr = KnowledgeManager()
         self.policy_mgr = PolicyManager(context_fold_placeholder=self.context_fold_placeholder)
-        self.context_mgr = ContextManager(context_window_messages=self.context_window_messages)
         self.subagent_mgr = SubAgentManager(obs=self.obs)
         self.task_board = TaskBoard(agent_id="main")
 
@@ -291,9 +288,9 @@ class StructRecoveryRuntimeCore:
                 f"Execution time: {execution_time:.3f}s",
             ]
             if result.get("result") is not None:
-                lines.append(f"Result: {AgentUtils.truncate(str(result.get('result')), 2400)}")
+                lines.append(f"Result: {str(result.get('result'))}")
             if stdout.strip():
-                lines.append(f"Stdout:\n{AgentUtils.truncate(stdout, 3200)}")
+                lines.append(f"Stdout:\n{stdout}")
             return "\n".join(lines), True
 
         lines = [
@@ -301,9 +298,9 @@ class StructRecoveryRuntimeCore:
             f"Execution time: {execution_time:.3f}s",
         ]
         if stderr.strip():
-            lines.append(f"Stderr:\n{AgentUtils.truncate(stderr, 3200)}")
+            lines.append(f"Stderr:\n{stderr}")
         elif stdout.strip():
-            lines.append(f"Stdout:\n{AgentUtils.truncate(stdout, 3200)}")
+            lines.append(f"Stdout:\n{stdout}")
         else:
             lines.append("Stderr:\nunknown runtime error")
         return "\n".join(lines), False
@@ -407,7 +404,6 @@ class StructRecoveryRuntimeCore:
     def _reset_runtime_state(self) -> None:
         self.knowledge_mgr.reset()
         self.policy_mgr.reset()
-        self.context_mgr.reset()
         self.subagent_mgr.reset()
         self.task_board.reset()
         self.task_board.set_on_change(None)
@@ -421,32 +417,6 @@ class StructRecoveryRuntimeCore:
         self._final_text = ""
         self._finalize_payload = {}
         self._reset_tool_execution_extension()
-
-    def _append_context_message(
-        self,
-        *,
-        role: str,
-        source: str,
-        content: str,
-        turn_id: str,
-        agent_id: str,
-        pinned: bool = False,
-    ) -> ContextMessageRow:
-        self._context_seq += 1
-        row = ContextMessageRow(
-            message_id=f"Message_{self._context_seq:06d}",
-            role=str(role or "assistant"),
-            source=str(source or "runtime"),
-            content=str(content or ""),
-            turn_id=str(turn_id or ""),
-            agent_id=str(agent_id or "main"),
-            created_at=time.time(),
-            pinned=bool(pinned),
-            pruned=False,
-            folded=False,
-        )
-        self.context_mgr._context_messages.append(row)
-        return row
 
     def _next_policy_message_id(self) -> str:
         self._policy_seq += 1
@@ -562,42 +532,6 @@ class StructRecoveryRuntimeCore:
         ref = self.policy_mgr._policy_messages_by_id.get(message_id)
         return bool(ref and ref.protected)
 
-    def _context_rows(self, *, include_pruned: bool = False, include_folded: bool = True) -> List[ContextMessageRow]:
-        rows = list(self.context_mgr._context_messages) if include_pruned else [row for row in self.context_mgr._context_messages if not row.pruned]
-        if include_folded:
-            return rows
-        return [row for row in rows if not row.folded]
-
-    def _context_markdown(
-        self,
-        *,
-        max_messages: Optional[int] = None,
-        include_pruned: bool = False,
-        include_folded: bool = True,
-    ) -> str:
-        rows = self.context_mgr.get_rows(include_pruned=include_pruned, include_folded=include_folded)
-        if not rows:
-            return "(empty)"
-        if max_messages is None:
-            max_messages = self.context_window_messages
-        tail = rows[-max(1, int(max_messages)) :]
-        lines: List[str] = []
-        for row in tail:
-            state: List[str] = ["pruned" if row.pruned else "active"]
-            if row.folded:
-                state.append("folded")
-            if row.pinned:
-                state.append("pinned")
-            lines.append(f"消息ID: {row.message_id}")
-            lines.append(f"- role: {row.role}")
-            lines.append(f"- state: {','.join(state)}")
-            lines.append(f"- source: {row.source}")
-            lines.append(f"- turn_id: {row.turn_id}")
-            content_text = self.context_fold_placeholder if row.folded else row.content
-            lines.append(f"- content: {AgentUtils.truncate(content_text, 380)}")
-            lines.append("")
-        return "\n".join(lines)
-
     @staticmethod
     def _extract_message_ids(text: str) -> List[str]:
         picked: List[str] = []
@@ -703,6 +637,7 @@ class StructRecoveryRuntimeCore:
                 "overwrite": bool(overwrite),
                 "added_count": len(cleaned),
                 "source": source,
+                "agent_name": self.runtime_name,
                 "policy_id": self.policy_id,
                 "git_commit": self.git_commit,
                 "loop_mode": self.loop_mode,
@@ -860,16 +795,29 @@ class StructRecoveryRuntimeCore:
             message_id = self.policy_mgr.message_id_of_obj(msg) or f"Message_{idx:06d}"
             lines.append(f"消息ID: {message_id}")
             lines.append(f"- role: {role}")
-            lines.append(f"- content: {AgentUtils.truncate(AgentUtils.content_to_text(getattr(msg, 'content', '')), 1200)}")
+            lines.append(f"- content: {AgentUtils.content_to_text(getattr(msg, 'content', ''))}")
             tool_calls = getattr(msg, "tool_calls", None)
             if isinstance(tool_calls, list) and tool_calls:
-                lines.append(f"- tool_calls: {AgentUtils.truncate(AgentUtils.content_to_text(tool_calls), 800)}")
+                lines.append(f"- tool_calls: {AgentUtils.content_to_text(tool_calls)}")
             if role == "tool":
                 lines.append(f"- tool_call_id: {str(getattr(msg, 'tool_call_id', '') or '')}")
             lines.append("")
         return "\n".join(lines)
 
-    def _build_policy_compress_snapshot(self, *, iteration: int, user_request: str) -> str:
+    def _render_current_work_from_messages(self, *, messages: List[Any], max_messages: int) -> str:
+        if not messages:
+            return "(empty)"
+        cap = max(1, int(max_messages))
+        picked: List[Any] = []
+        for msg in messages:
+            msg_type = str(getattr(msg, "type", "") or "").strip().lower()
+            if msg_type in {"ai", "tool"}:
+                picked.append(msg)
+        if not picked:
+            return "(empty)"
+        return self._render_policy_messages_for_distill(picked[-cap:])
+
+    def _build_policy_compress_snapshot(self, *, messages: List[Any], iteration: int, user_request: str) -> str:
         return self.prompt_manager.render(
             "agent/policy_compress_snapshot.md",
             {
@@ -877,7 +825,7 @@ class StructRecoveryRuntimeCore:
                 "iteration": int(iteration),
                 "key_technical_concepts": self.knowledge_mgr.to_markdown(max_items=8),
                 "pending_tasks": self.task_board.render_status_board(),
-                "current_work": self.context_mgr.to_markdown(max_messages=30),
+                "current_work": self._render_current_work_from_messages(messages=messages, max_messages=30),
                 "optional_next_step": "\n".join([f"- {x}" for x in self.knowledge_mgr.knowledge.next_actions[:10]]) or "- 无",
                 "handoff_anchors": "\n".join([f"- {x}" for x in self.knowledge_mgr.knowledge.evidence[:10]]) or "- 无",
             },
@@ -944,7 +892,7 @@ class StructRecoveryRuntimeCore:
                 iteration=iteration,
                 task_board_md=self.task_board.get_task_board(view="both"),
                 knowledge_md=self.knowledge_mgr.to_markdown(max_items=20),
-                context_md=self.context_mgr.to_markdown(max_messages=60),
+                context_md=self._render_current_work_from_messages(messages=messages, max_messages=60),
                 history_md=history_md,
             )
             distilled_summary = str(distilled.summary_markdown or "").strip()
@@ -983,7 +931,11 @@ class StructRecoveryRuntimeCore:
             )
 
         if not distilled_summary:
-            distilled_summary = self._build_policy_compress_snapshot(iteration=iteration, user_request=user_request)
+            distilled_summary = self._build_policy_compress_snapshot(
+                messages=messages,
+                iteration=iteration,
+                user_request=user_request,
+            )
 
         rebuilt: List[Any] = list(protected_messages)
         self.policy_mgr.append_message(
@@ -1006,6 +958,7 @@ class StructRecoveryRuntimeCore:
             {
                 "turn_id": turn_id,
                 "agent_id": agent_id,
+                "agent_name": self.runtime_name,
                 "parent_agent_id": parent_agent_id,
                 "removed_count": max(0, original_count - len(messages)),
                 "reason": str(reason or "policy_history_overflow"),
@@ -1086,6 +1039,7 @@ class StructRecoveryRuntimeCore:
                 "task_board_updated",
                 {
                     "agent_id": current_agent_id,
+                    "agent_name": self.runtime_name,
                     "parent_agent_id": parent_agent_id,
                     "changed_task_ids": list(changed_task_ids),
                     "task_count": int(self.task_board.task_count()),
@@ -1251,6 +1205,7 @@ class StructRecoveryRuntimeCore:
                 "context_pruned",
                 {
                     "agent_id": current_agent_id,
+                    "agent_name": self.runtime_name,
                     "parent_agent_id": parent_agent_id,
                     "removed_count": 0,
                     "folded_count": len(folded),
@@ -1504,21 +1459,14 @@ class StructRecoveryRuntimeCore:
         outputs = sorted(outputs, key=lambda row: int(row.get("index", 0)))
 
         for row in outputs:
-            result_text = str(row.get("result", "") or "")
             self._on_tool_execution_completed(row)
-            self.context_mgr.append(
-                role="tool",
-                source=f"policy:{str(row.get('tool_name', '') or '')}",
-                content=result_text,
-                turn_id=turn_id,
-                agent_id=agent_id,
-            )
 
         self.obs.emit(
             "tool_batch_executed",
             {
                 "turn_id": turn_id,
                 "agent_id": agent_id,
+                "agent_name": self.runtime_name,
                 "parent_agent_id": parent_agent_id,
                 "iteration": int(iteration),
                 "batch_size": len(outputs),
@@ -1711,6 +1659,7 @@ class StructRecoveryRuntimeCore:
                 {
                     "turn_id": turn_id,
                     "agent_id": agent_id,
+                    "agent_name": self.runtime_name,
                     "tools": [{"name": t.name, "description": getattr(t, "description", "")} for t in all_tools],
                 },
             )
@@ -1735,6 +1684,8 @@ class StructRecoveryRuntimeCore:
                     "llm_response_failed",
                     {
                         "turn_id": turn_id,
+                        "agent_id": agent_id,
+                        "agent_name": self.runtime_name,
                         "error": str(e),
                         "messages": self._serialize_messages_for_log(messages),
                     },
@@ -1759,16 +1710,6 @@ class StructRecoveryRuntimeCore:
                 turn_id=turn_id,
                 protected=False,
             )
-
-            assistant_text = response_text.strip()
-            if assistant_text:
-                self.context_mgr.append(
-                    role="assistant",
-                    source="llm:policy",
-                    content=assistant_text,
-                    turn_id=turn_id,
-                    agent_id=agent_id,
-                )
 
             call_rows = tool_calls if isinstance(tool_calls, list) else []
             if call_rows:
@@ -1849,6 +1790,7 @@ class StructRecoveryRuntimeCore:
             "session_start",
             {
                 "user_request": str(user_request or "").strip(),
+                "agent_name": self.runtime_name,
                 "model": self.model,
                 "ida_service_url": self.ida_client.base_url,
                 "tool_profile": self.tool_profile,
@@ -1875,6 +1817,7 @@ class StructRecoveryRuntimeCore:
             completion_payload = {
                 "duration_s": round(time.perf_counter() - run_started, 4),
                 "iterations_used": iterations_used,
+                "agent_name": self.runtime_name,
                 "final_response": AgentUtils.truncate(final_text, 12000),
                 "completed_reason": str(result.get("reason", "")),
                 "policy_id": self.policy_id,
@@ -1892,6 +1835,7 @@ class StructRecoveryRuntimeCore:
                 "session_incomplete",
                 {
                     "duration_s": round(time.perf_counter() - run_started, 4),
+                    "agent_name": self.runtime_name,
                     "error": str(e),
                     "policy_id": self.policy_id,
                     "git_commit": self.git_commit,

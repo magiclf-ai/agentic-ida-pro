@@ -225,7 +225,6 @@ class SubAgentRuntime:
         child.tool_profile = self.core.tool_profile
         child.expert_tools = child._build_expert_tools(child.tool_profile)
         child.expert_tool_map = {row.name: row for row in child.expert_tools}
-        child.context_window_messages = self.core.context_window_messages
         child.subagent_max_context_chars = self.core.subagent_max_context_chars
         child.subagent_max_parallel = self.core.subagent_max_parallel
         child.policy_history_max_messages = self.core.policy_history_max_messages
@@ -260,7 +259,7 @@ class SubAgentRuntime:
             {
                 "user_request": str(user_request or ""),
                 "task": str(request.get("task", "") or "").strip(),
-                "context": AgentUtils.truncate(str(request.get("context", "") or "").strip(), self.core.subagent_max_context_chars),
+                "context": str(request.get("context", "") or "").strip(),
             },
         )
 
@@ -342,16 +341,6 @@ class SubAgentRuntime:
                 turn_id=turn_id,
                 protected=False,
             )
-
-            assistant_text = response_text.strip()
-            if assistant_text:
-                self.core.context_mgr.append(
-                    role="assistant",
-                    source="llm:subpolicy",
-                    content=assistant_text,
-                    turn_id=turn_id,
-                    agent_id=agent_id,
-                )
 
             call_rows = tool_calls if isinstance(tool_calls, list) else []
             if call_rows:

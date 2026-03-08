@@ -157,9 +157,9 @@ class SubAgentManager:
                     f"- status: {state.status}",
                     f"- profile: {state.profile}",
                     f"- priority: {state.priority}",
-                    f"- task: {_truncate(state.task_md, 600)}",
+                    f"- task: {state.task_md}",
                     "- result:",
-                    _truncate(state.result_md or "(empty subagent result)", 3200),
+                    (state.result_md or "(empty subagent result)"),
                     "",
                 ]
             )
