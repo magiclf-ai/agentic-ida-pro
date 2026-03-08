@@ -1746,9 +1746,10 @@ class StructRecoveryRuntimeCore:
                 response_text=response_text,
                 tool_calls=tool_calls,
             )
+            ai_message = AIMessage(content=response_text, tool_calls=tool_calls)
             self.policy_mgr.append_message(
                 messages=messages,
-                message_obj=AIMessage(content=response_text, tool_calls=tool_calls),
+                message_obj=ai_message,
                 role="assistant",
                 turn_id=turn_id,
                 protected=False,
@@ -1817,6 +1818,16 @@ class StructRecoveryRuntimeCore:
     async def run(self, user_request: str, max_iterations: int = 30) -> str:
         self._init_session_logger()
         self._reset_runtime_state()
+
+        # Set binary name for this session
+        if self.session_logger:
+            try:
+                binary_name = self.ida_client.get_current_filename()
+                if binary_name:
+                    self.session_logger.set_binary_name(binary_name)
+                    print(f"[INFO] Session binary: {binary_name}")
+            except Exception as e:
+                print(f"[WARN] Failed to get binary name: {e}")
 
         run_started = time.perf_counter()
         self.obs.emit(

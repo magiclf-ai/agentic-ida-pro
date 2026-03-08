@@ -1162,42 +1162,160 @@ def expand_call_path(
             max_depth=max_depth,
             include_thunks=include_thunks,
         )
-        nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
-        edges = graph.get("edges", []) if isinstance(graph, dict) else []
+        payload = graph if isinstance(graph, dict) else {}
+        nodes = payload.get("nodes", [])
+        edges = payload.get("edges", [])
+        resolved_entries = payload.get("resolved_entries", [])
+        missing_entries = payload.get("missing_entries", [])
+
+        def _as_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        def _as_str_list(value: Any) -> List[str]:
+            if not isinstance(value, list):
+                return []
+            result = []
+            for row in value:
+                text = str(row).strip()
+                if text:
+                    result.append(text)
+            return result
+
         node_map: Dict[int, Dict[str, Any]] = {}
-        for row in nodes:
+        depth_map: Dict[int, int] = {}
+        for row in nodes if isinstance(nodes, list) else []:
             if not isinstance(row, dict):
                 continue
-            node_map[int(row.get("ea", 0))] = row
+            ea = _as_int(row.get("ea", 0), 0)
+            if ea <= 0:
+                continue
+            node_map[ea] = row
+            depth_map[ea] = _as_int(row.get("depth", 0), 0)
+
+        edges_by_from_set: Dict[int, set] = {}
+        for row in edges if isinstance(edges, list) else []:
+            if not isinstance(row, dict):
+                continue
+            from_ea = _as_int(row.get("from_ea", 0), 0)
+            to_ea = _as_int(row.get("to_ea", 0), 0)
+            if from_ea <= 0 or to_ea <= 0:
+                continue
+            bucket = edges_by_from_set.setdefault(from_ea, set())
+            bucket.add(to_ea)
 
         edges_by_from: Dict[int, List[int]] = {}
-        for row in edges:
-            if not isinstance(row, dict):
-                continue
-            from_ea = int(row.get("from_ea", 0))
-            to_ea = int(row.get("to_ea", 0))
-            if from_ea not in edges_by_from:
-                edges_by_from[from_ea] = []
-            if to_ea not in edges_by_from[from_ea]:
-                edges_by_from[from_ea].append(to_ea)
+        for from_ea, to_set in edges_by_from_set.items():
+            edges_by_from[from_ea] = sorted(
+                list(to_set),
+                key=lambda ea: (depth_map.get(int(ea), 1 << 30), int(ea)),
+            )
 
-        ordered_nodes = sorted(
-            [row for row in nodes if isinstance(row, dict)],
-            key=lambda item: (int(item.get("depth", 0)), int(item.get("ea", 0))),
-        )
-        lines: List[str] = []
-        missing = graph.get("missing_entries", []) if isinstance(graph, dict) else []
-        if isinstance(missing, list) and missing:
-            lines.append(f"missing: {', '.join([str(x) for x in missing])}")
-        for node in ordered_nodes:
-            ea = int(node.get("ea", 0))
-            name = str(node.get("name", "") or f"sub_{ea:x}")
-            lines.append(f"{name}@0x{ea:x} -->")
-            for to_ea in edges_by_from.get(ea, []):
-                callee = node_map.get(int(to_ea), {})
-                callee_name = str(callee.get("name", "") or f"sub_{int(to_ea):x}")
-                lines.append(f"    {callee_name}@0x{int(to_ea):x}")
-        return "\n".join(lines) if lines else "(empty)"
+        def _node_label(ea: int) -> str:
+            row = node_map.get(int(ea), {})
+            name = str(row.get("name", "")).strip() if isinstance(row, dict) else ""
+            if not name:
+                name = f"sub_{int(ea):x}"
+            return f"{name}@0x{int(ea):x}"
+
+        def _dedupe_keep_order(values: List[int]) -> List[int]:
+            seen = set()
+            result = []
+            for value in values:
+                item = int(value)
+                if item in seen:
+                    continue
+                seen.add(item)
+                result.append(item)
+            return result
+
+        root_eas: List[int] = []
+        if isinstance(resolved_entries, list):
+            for item in resolved_entries:
+                if not isinstance(item, dict):
+                    continue
+                ea = _as_int(item.get("ea", 0), 0)
+                if ea > 0:
+                    root_eas.append(ea)
+        root_eas = _dedupe_keep_order(root_eas)
+        if not root_eas:
+            depth0 = sorted([ea for ea, d in depth_map.items() if int(d) == 0], key=lambda ea: int(ea))
+            root_eas = _dedupe_keep_order(depth0)
+        if not root_eas and node_map:
+            root_eas = [ea for ea in sorted(node_map.keys())[:1]]
+
+        requested_entries = _as_str_list(payload.get("entries", []))
+        missing_text = _as_str_list(missing_entries)
+        node_count = len(node_map)
+        edge_count = sum(len(v) for v in edges_by_from.values())
+
+        lines: List[str] = [
+            "# Call Path Tree",
+            f"- requested_entries: {len(requested_entries)} ({', '.join(requested_entries) if requested_entries else '(none)'})",
+            f"- resolved_entries: {len(root_eas)}",
+            f"- missing_entries: {len(missing_text)}",
+            f"- max_depth: {_as_int(payload.get('max_depth', max_depth), max_depth)}",
+            f"- include_thunks: {'true' if bool(payload.get('include_thunks', include_thunks)) else 'false'}",
+            f"- node_count: {node_count}",
+            f"- edge_count: {edge_count}",
+            "",
+        ]
+        if missing_text:
+            lines.append("## Missing Entries")
+            for name in missing_text:
+                lines.append(f"- {name}")
+            lines.append("")
+        if not root_eas:
+            lines.append("No callable roots resolved.")
+            return "\n".join(lines)
+
+        lines.append("## Trees")
+        first_seen_at: Dict[int, str] = {}
+        expanded_nodes = set()
+
+        def _render_children(parent_ea: int, prefix: str, path_stack: List[int], path_tag: str) -> None:
+            children = edges_by_from.get(int(parent_ea), [])
+            for idx, child_ea in enumerate(children):
+                child = int(child_ea)
+                is_last = idx == len(children) - 1
+                connector = "`-" if is_last else "|-"
+                child_label = _node_label(child)
+                if child in path_stack:
+                    lines.append(f"{prefix}{connector} {child_label} [cycle]")
+                    continue
+                if child in expanded_nodes:
+                    ref_at = first_seen_at.get(child, "unknown")
+                    lines.append(f"{prefix}{connector} {child_label} [ref: {ref_at}]")
+                    continue
+                child_path_tag = f"{path_tag} -> {child_label}"
+                first_seen_at[child] = child_path_tag
+                expanded_nodes.add(child)
+                lines.append(f"{prefix}{connector} {child_label}")
+                next_prefix = prefix + ("   " if is_last else "|  ")
+                _render_children(
+                    parent_ea=child,
+                    prefix=next_prefix,
+                    path_stack=path_stack + [child],
+                    path_tag=child_path_tag,
+                )
+
+        for idx, root_ea in enumerate(root_eas, start=1):
+            root = int(root_ea)
+            root_label = _node_label(root)
+            root_tag = f"entry[{idx}]"
+            if root in expanded_nodes:
+                ref_at = first_seen_at.get(root, "unknown")
+                lines.append(f"{root_tag} {root_label} [ref: {ref_at}]")
+                continue
+            first_seen_at[root] = root_tag
+            expanded_nodes.add(root)
+            lines.append(f"{root_tag} {root_label}")
+            _render_children(parent_ea=root, prefix="", path_stack=[root], path_tag=root_tag)
+            if idx != len(root_eas):
+                lines.append("")
+        return "\n".join(lines)
     except Exception as e:
         return f"ERROR: expanding call path failed: {str(e)}"
 

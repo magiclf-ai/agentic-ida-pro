@@ -19,12 +19,19 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 
 def _fetch_sessions(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    rows = conn.execute(
-        """
+    # Check if binary_name column exists (backward compatibility)
+    try:
+        conn.execute("SELECT binary_name FROM sessions LIMIT 1")
+        has_binary_name = True
+    except sqlite3.OperationalError:
+        has_binary_name = False
+
+    sql = """
         SELECT
             s.session_id,
             s.created_at,
             s.updated_at,
+            {binary_col}
             COUNT(DISTINCT t.id) as turn_count,
             COUNT(DISTINCT m.id) as message_count,
             (SELECT content FROM messages
@@ -41,13 +48,15 @@ def _fetch_sessions(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         LEFT JOIN messages m ON m.session_id = s.session_id
         GROUP BY s.session_id
         ORDER BY s.updated_at DESC
-        """
-    ).fetchall()
+    """.format(binary_col="s.binary_name," if has_binary_name else "'' as binary_name,")
+
+    rows = conn.execute(sql).fetchall()
     return [
         {
             "session_id": str(row["session_id"]),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
+            "binary_name": str(row["binary_name"] or ""),
             "turn_count": int(row["turn_count"] or 0),
             "message_count": int(row["message_count"] or 0),
             "goal": str(row["goal"] or ""),

@@ -344,6 +344,26 @@ else:
             raise Exception(data.get("error", "take_database_snapshot failed"))
         return data
     
+    def get_current_filename(self) -> str:
+        """获取当前打开的 IDB 文件名（不含路径和扩展名）。"""
+        try:
+            result = self.execute_script(script='''
+import idc
+import os
+path = idc.get_idb_path()
+if path:
+    __result__ = {"success": True, "filename": os.path.basename(path)}
+else:
+    __result__ = {"success": False, "error": "no database open"}
+''')
+            if result.get("success"):
+                data = result.get("result", {})
+                if data.get("success"):
+                    return str(data.get("filename", ""))
+        except Exception:
+            pass
+        return ""
+
     def execute_script(self, script: str, context: Optional[Dict] = None) -> Dict[str, Any]:
         """
         执行 IDAPython 脚本

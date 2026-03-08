@@ -39,10 +39,14 @@ class AgentSessionLogger:
               session_id TEXT PRIMARY KEY,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
-              log_path TEXT DEFAULT ''
+              log_path TEXT DEFAULT '',
+              binary_name TEXT DEFAULT ''
             )
             """
         )
+        session_columns = {str(row["name"]) for row in cur.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "binary_name" not in session_columns:
+            cur.execute("ALTER TABLE sessions ADD COLUMN binary_name TEXT DEFAULT ''")
 
         cur.execute(
             """
@@ -86,6 +90,9 @@ class AgentSessionLogger:
             )
             """
         )
+        message_columns = {str(row["name"]) for row in cur.execute("PRAGMA table_info(messages)").fetchall()}
+        if "name" not in message_columns:
+            cur.execute("ALTER TABLE messages ADD COLUMN name TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, msg_index)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_turn ON messages(session_id, turn_id)")
 
@@ -127,8 +134,8 @@ class AgentSessionLogger:
         # Insert session
         now = _utc_now_iso()
         cur.execute(
-            "INSERT OR REPLACE INTO sessions(session_id, created_at, updated_at, log_path) VALUES(?,?,?,?)",
-            (self.session_id, now, now, ""),
+            "INSERT OR REPLACE INTO sessions(session_id, created_at, updated_at, log_path, binary_name) VALUES(?,?,?,?,?)",
+            (self.session_id, now, now, "", ""),
         )
         self._db.commit()
 
@@ -140,20 +147,22 @@ class AgentSessionLogger:
         tool_calls: Optional[List[Dict]] = None,
         tool_call_id: str = "",
         is_error: bool = False,
+        name: str = "",
     ) -> None:
         self._msg_index += 1
         now = _utc_now_iso()
         self._db.execute(
             """
-            INSERT INTO messages(session_id, turn_id, msg_index, role, content,
+            INSERT INTO messages(session_id, turn_id, msg_index, role, name, content,
                                  tool_calls, tool_call_id, is_error, created_at)
-            VALUES(?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 self.session_id,
                 turn_id,
                 self._msg_index,
                 role,
+                name[:100] if name else None,
                 content[:40000] if content else "",
                 json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
                 tool_call_id,
@@ -306,13 +315,17 @@ class AgentSessionLogger:
                     tool_calls = msg.get("tool_calls", [])
                     if not isinstance(tool_calls, list):
                         tool_calls = []
+                    content = msg.get("content", "")
+                    role = msg.get("role", "user")
+                    name = msg.get("name", "")
                     self._add_message(
                         turn_id=turn_id,
-                        role=msg.get("role", "user"),
-                        content=msg.get("content", ""),
+                        role=role,
+                        content=content,
                         tool_calls=tool_calls,
                         tool_call_id=str(msg.get("tool_call_id", "") or ""),
                         is_error=bool(msg.get("is_error", False)),
+                        name=name,
                     )
 
                 # Update turn metrics if provided
@@ -334,6 +347,7 @@ class AgentSessionLogger:
                     role="assistant",
                     content=f"ERROR: {str(payload.get('error', '') or '').strip()}",
                     is_error=True,
+                    name="",
                 )
                 self._update_turn_complete(turn_id, status="failed", error_text=str(payload.get("error", "")))
 
@@ -354,6 +368,15 @@ class AgentSessionLogger:
                 tool_calls = payload.get("tool_calls", [])
                 self._ensure_turn(turn_id, agent_id, agent_name, iteration, phase or "", "running")
                 self._log_executed_tool_calls(turn_id, tool_calls if isinstance(tool_calls, list) else [])
+
+    def set_binary_name(self, binary_name: str) -> None:
+        """Set the binary file name for this session."""
+        now = _utc_now_iso()
+        self._db.execute(
+            "UPDATE sessions SET binary_name=?, updated_at=? WHERE session_id=?",
+            (binary_name, now, self.session_id),
+        )
+        self._db.commit()
 
     def close(self) -> None:
         try:

@@ -140,7 +140,33 @@ PYTHONPATH=src .venv/bin/python reverse_agent.py \
 - 启动并等待 `reverse_expert.py`
 - 结束时调用 `/db/close`（默认保存）并回收 service 进程
 
-### 8.2 仅启动 IDA Service（可选）
+### 8.2 目录批量分析（异步并发）
+
+```bash
+cd /mnt/d/reverse/agentic_ida_pro
+OPENAI_API_KEY='your-api-key-1' \
+OPENAI_BASE_URL='http://192.168.72.1:8317/v1' \
+OPENAI_MODEL='gpt-5.2' \
+PYTHONPATH=src .venv/bin/python reverse_agent.py \
+    --input-path /abs/path/to/samples \
+    --recursive \
+    --file-pattern '*.i64' \
+    --file-pattern '*.exe' \
+    --concurrency 3 \
+    --ida-port 5000 \
+    --request "批量分析并恢复关键结构体，输出证据链" \
+    --agent-core dispatcher \
+    --max-iterations 40
+```
+
+说明：
+
+- 建议统一使用 `--input-path`，当该路径是目录时自动进入批量模式
+- `--input-dir` 仍可用，但仅作为 `--input-path` 的兼容别名
+- 批量模式下端口为动态分配（从 `--ida-port` 起寻找可用端口），避免并发冲突
+- 建议端口区间预留充足，避免与本机其他服务冲突
+
+### 8.3 仅启动 IDA Service（可选）
 
 ```bash
 cd /mnt/d/reverse/agentic_ida_pro
@@ -188,7 +214,10 @@ bash src/entrypoints/run_ida_service.sh
 
 常用参数：
 
-- `--input-path`：目标二进制或 IDB 路径（必填）
+- `--input-path`：统一输入路径；文件=单目标模式，目录=批量模式
+- `--input-dir`：兼容别名（建议改用 `--input-path`）
+- `--concurrency`：批量并发 worker 数（每个 worker 启动一个独立 ida_service）
+- `--file-pattern`：批量模式 glob 过滤（可重复）
 - `--request`：逆向任务描述（必填）
 - `--ida-host/--ida-port`：service 绑定地址
 - `--no-save-on-exit`：退出时关闭数据库不保存

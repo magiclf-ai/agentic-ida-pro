@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { Search, RefreshCw, Activity, Clock, Hash } from 'lucide-vue-next'
+import { Search, RefreshCw, Activity, Clock, Hash, FileCode } from 'lucide-vue-next'
 import { formatRelativeTime, formatSessionId, getStatusType } from '../utils/formatters.js'
 
 const props = defineProps({
@@ -18,12 +18,24 @@ function cleanMessageId(content) {
   return content.replace(/^\s*消息ID:\s*Message_\d+\s*/i, '')
 }
 
+// Extract filename from binary_name or path
+function getBinaryName(session) {
+  if (session.binary_name) return session.binary_name
+  // Try to extract from first user message if it contains file path
+  if (session.goal) {
+    const match = session.goal.match(/[\\/]([^\\/]+\.(exe|dll|so|dylib|elf|bin|i64|idb))/i)
+    if (match) return match[1]
+  }
+  return ''
+}
+
 const filteredSessions = computed(() => {
   if (!props.searchQuery) return props.sessions
   const query = props.searchQuery.toLowerCase()
   return props.sessions.filter(s =>
     (s.session_id && s.session_id.toLowerCase().includes(query)) ||
-    (s.goal && s.goal.toLowerCase().includes(query))
+    (s.goal && s.goal.toLowerCase().includes(query)) ||
+    (s.binary_name && s.binary_name.toLowerCase().includes(query))
   )
 })
 
@@ -46,7 +58,7 @@ const sortedSessions = computed(() => {
         <RefreshCw class="icon" />
       </button>
     </div>
-    
+
     <div class="search-box">
       <Search class="search-icon" />
       <input
@@ -57,7 +69,7 @@ const sortedSessions = computed(() => {
         class="search-input"
       />
     </div>
-    
+
     <div class="sessions-list">
       <div
         v-for="session in sortedSessions"
@@ -77,10 +89,14 @@ const sortedSessions = computed(() => {
           </span>
         </div>
 
-        <div v-if="session.goal" class="session-id-secondary">
-          {{ formatSessionId(session.session_id) }}
+        <div v-if="session.goal || getBinaryName(session)" class="session-id-secondary">
+          <span v-if="getBinaryName(session)" class="binary-name">
+            <FileCode class="binary-icon" />
+            {{ getBinaryName(session) }}
+          </span>
+          <span v-else>{{ formatSessionId(session.session_id) }}</span>
         </div>
-        
+
         <div class="session-meta">
           <span class="meta-item">
             <Clock class="meta-icon" />
@@ -92,7 +108,7 @@ const sortedSessions = computed(() => {
           </span>
         </div>
       </div>
-      
+
       <div v-if="sortedSessions.length === 0" class="empty-state">
         No sessions found
       </div>
@@ -319,10 +335,30 @@ const sortedSessions = computed(() => {
   font-size: 10px;
   color: #9ca3af;
   margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .sessions-panel.is-dark .session-id-secondary {
   color: #6b7280;
+}
+
+.binary-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #3b82f6;
+  font-weight: 500;
+}
+
+.sessions-panel.is-dark .binary-name {
+  color: #60a5fa;
+}
+
+.binary-icon {
+  width: 10px;
+  height: 10px;
 }
 
 .status-badge {

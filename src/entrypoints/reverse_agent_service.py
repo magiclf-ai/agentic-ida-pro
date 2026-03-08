@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import argparse
 import os
+import socket
 import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import requests
 
@@ -25,6 +27,65 @@ from entrypoints.reverse_expert import (
     DEFAULT_REPORT_DIR,
     run_from_namespace as run_reverse_expert_from_namespace,
 )
+
+LIKELY_BINARY_SUFFIXES = {
+    ".i64",
+    ".idb",
+    ".i32",
+    ".exe",
+    ".dll",
+    ".sys",
+    ".drv",
+    ".so",
+    ".dylib",
+    ".elf",
+    ".bin",
+    ".com",
+    ".out",
+    ".axf",
+    ".ko",
+    ".o",
+    ".a",
+}
+
+LIKELY_TEXT_SUFFIXES = {
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".xml",
+    ".csv",
+    ".log",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".html",
+    ".css",
+    ".vue",
+    ".sh",
+    ".bat",
+    ".ps1",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".java",
+    ".rs",
+    ".go",
+    ".swift",
+    ".kt",
+    ".m",
+}
+
+DEFAULT_BATCH_PATTERNS = ["*"]
 
 
 def _service_access_host(bind_host: str) -> str:
@@ -87,7 +148,24 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Start ida_service subprocess, open binary/IDB, then run reverse expert agent",
     )
     parser.add_argument("--request", required=True, help="Reverse-analysis request")
-    parser.add_argument("--input-path", required=True, help="Binary or IDB path to open before agent run")
+    parser.add_argument(
+        "--input-path",
+        default="",
+        help="Input path. File=single-target mode; directory=batch mode",
+    )
+    parser.add_argument(
+        "--input-dir",
+        default="",
+        help="Deprecated alias of --input-path (directory).",
+    )
+    parser.add_argument("--recursive", action="store_true", help="Recursively scan when input-path is a directory")
+    parser.add_argument(
+        "--file-pattern",
+        action="append",
+        default=[],
+        help="Glob pattern for batch mode (repeatable, default='*')",
+    )
+    parser.add_argument("--concurrency", type=int, default=1, help="Batch worker count")
 
     parser.add_argument("--ida-host", default="127.0.0.1", help="ida_service bind host")
     parser.add_argument("--ida-port", type=int, default=5000, help="ida_service port")
@@ -110,18 +188,145 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = _build_parser().parse_args()
+def _port_probe_host(bind_host: str) -> str:
+    host = str(bind_host or "").strip() or "127.0.0.1"
+    if host in {"::", "[::]"}:
+        return "127.0.0.1"
+    return host
 
-    input_path = os.path.abspath(str(args.input_path or "").strip())
+
+def _can_bind_port(bind_host: str, port: int) -> bool:
+    host = _port_probe_host(bind_host)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, int(port)))
+        return True
+    except Exception:
+        return False
+
+
+def _allocate_dynamic_port(bind_host: str, base_port: int, reserved_ports: Optional[set[int]] = None) -> int:
+    reserved = reserved_ports or set()
+    start = max(1, int(base_port))
+
+    for candidate in range(start, start + 2048):
+        if candidate in reserved:
+            continue
+        if _can_bind_port(bind_host, candidate):
+            return int(candidate)
+
+    host = _port_probe_host(bind_host)
+    for _ in range(128):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, 0))
+            candidate = int(sock.getsockname()[1])
+        if candidate not in reserved:
+            return candidate
+
+    raise RuntimeError("failed to allocate available ida_service port")
+
+
+def _is_probably_binary_file(path: Path) -> bool:
+    try:
+        data = path.read_bytes()[:4096]
+    except Exception:
+        return False
+    if not data:
+        return False
+    if b"\x00" in data:
+        return True
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = ""
+    if text:
+        control = 0
+        for ch in text:
+            code = ord(ch)
+            if (code < 32 and ch not in {"\n", "\r", "\t", "\f", "\b"}) or code == 127:
+                control += 1
+        if control <= max(2, len(text) // 100):
+            return False
+    printable = set(range(32, 127)) | {7, 8, 9, 10, 12, 13, 27}
+    non_printable = sum(1 for b in data if b not in printable)
+    ratio = float(non_printable) / float(len(data))
+    return ratio >= 0.30
+
+
+def _is_supported_target_file(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix in LIKELY_BINARY_SUFFIXES:
+        return True
+    if suffix in LIKELY_TEXT_SUFFIXES:
+        return False
+    return _is_probably_binary_file(path)
+
+
+def _iter_candidate_files(input_dir: Path, recursive: bool, patterns: Sequence[str]) -> List[Path]:
+    unique: Dict[str, Path] = {}
+    for raw_pattern in patterns:
+        pattern = str(raw_pattern or "").strip() or "*"
+        iterator = input_dir.rglob(pattern) if recursive else input_dir.glob(pattern)
+        for item in iterator:
+            if not item.is_file():
+                continue
+            key = str(item.resolve())
+            unique[key] = item.resolve()
+    return [unique[key] for key in sorted(unique.keys())]
+
+
+def _discover_batch_targets(
+    input_dir: str,
+    recursive: bool,
+    patterns: Sequence[str],
+) -> List[str]:
+    root = Path(str(input_dir or "").strip()).resolve()
+    candidates = _iter_candidate_files(root, recursive=bool(recursive), patterns=patterns)
+    targets: List[str] = []
+    for item in candidates:
+        if _is_supported_target_file(item):
+            targets.append(str(item))
+    return targets
+
+
+def _safe_tag(text: str) -> str:
+    keep = []
+    for ch in str(text or ""):
+        if ch.isalnum() or ch in {"_", "-", "."}:
+            keep.append(ch)
+        else:
+            keep.append("_")
+    value = "".join(keep).strip("_")
+    return value or "target"
+
+
+def _build_reverse_run_namespace(
+    *,
+    args: argparse.Namespace,
+    service_url: str,
+    report_dir: str,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        request=str(args.request),
+        ida_url=service_url,
+        max_iterations=int(args.max_iterations),
+        agent_core=str(args.agent_core),
+        idapython_kb_dir=str(args.idapython_kb_dir or ""),
+        report_dir=str(report_dir or DEFAULT_REPORT_DIR),
+    )
+
+
+def _run_single_target(args: argparse.Namespace, input_path: str, ida_port: Optional[int] = None, report_dir: str = "") -> int:
+    input_path = os.path.abspath(str(input_path or "").strip())
     if not input_path or not os.path.exists(input_path):
         print(f"[ERROR] Input file not found: {input_path}")
         return 2
 
     bind_host = str(args.ida_host or "127.0.0.1").strip() or "127.0.0.1"
+    resolved_port = int(ida_port) if ida_port is not None else _allocate_dynamic_port(bind_host, int(args.ida_port))
     service_url = str(args.ida_url or "").strip()
     if not service_url:
-        service_url = f"http://{_service_access_host(bind_host)}:{int(args.ida_port)}"
+        service_url = f"http://{_service_access_host(bind_host)}:{resolved_port}"
 
     env = _build_env()
     service_cmd = [
@@ -132,7 +337,7 @@ def main() -> int:
         "--host",
         bind_host,
         "--port",
-        str(int(args.ida_port)),
+        str(resolved_port),
         "--log-dir",
         str(args.ida_log_dir),
     ]
@@ -184,13 +389,10 @@ def main() -> int:
         )
         print(f"[INFO] database opened: {open_result}")
 
-        reverse_args = argparse.Namespace(
-            request=str(args.request),
-            ida_url=service_url,
-            max_iterations=int(args.max_iterations),
-            agent_core=str(args.agent_core),
-            idapython_kb_dir=str(args.idapython_kb_dir or ""),
-            report_dir=str(args.report_dir or DEFAULT_REPORT_DIR),
+        reverse_args = _build_reverse_run_namespace(
+            args=args,
+            service_url=service_url,
+            report_dir=(report_dir or str(args.report_dir or DEFAULT_REPORT_DIR)),
         )
         print("[INFO] starting reverse agent in current process")
         exit_code = int(asyncio.run(run_reverse_expert_from_namespace(reverse_args)))
@@ -218,6 +420,233 @@ def main() -> int:
                 pass
 
     return int(exit_code)
+
+
+def _build_batch_child_cmd(
+    *,
+    args: argparse.Namespace,
+    input_path: str,
+    ida_port: int,
+    report_dir: str,
+) -> List[str]:
+    cmd = [
+        sys.executable,
+        str(PROJECT_ROOT / "reverse_agent.py"),
+        "--request",
+        str(args.request),
+        "--input-path",
+        str(input_path),
+        "--ida-host",
+        str(args.ida_host),
+        "--ida-port",
+        str(int(ida_port)),
+        "--ida-log-dir",
+        str(args.ida_log_dir),
+        "--service-wait-timeout",
+        str(int(args.service_wait_timeout)),
+        "--max-iterations",
+        str(int(args.max_iterations)),
+        "--agent-core",
+        str(args.agent_core),
+        "--report-dir",
+        str(report_dir),
+    ]
+    if bool(args.ida_debug):
+        cmd.append("--ida-debug")
+    if bool(args.no_run_auto_analysis):
+        cmd.append("--no-run-auto-analysis")
+    if bool(args.no_save_on_exit):
+        cmd.append("--no-save-on-exit")
+    if str(args.idapython_kb_dir or "").strip():
+        cmd.extend(["--idapython-kb-dir", str(args.idapython_kb_dir)])
+    return cmd
+
+
+async def _run_batch_worker(
+    *,
+    slot: int,
+    args: argparse.Namespace,
+    queue: "asyncio.Queue[Optional[Tuple[int, str]]]",
+    results: List[Dict[str, Any]],
+    batch_root: Path,
+    port_lock: asyncio.Lock,
+    reserved_ports: set[int],
+) -> None:
+    env = _build_env()
+
+    while True:
+        item = await queue.get()
+        if item is None:
+            queue.task_done()
+            return
+
+        index, target_path = item
+        start = time.time()
+        target_name = Path(target_path).name
+        report_dir = str(batch_root / f"{index:04d}_{_safe_tag(target_name)}")
+        async with port_lock:
+            worker_port = _allocate_dynamic_port(
+                bind_host=str(args.ida_host or "127.0.0.1"),
+                base_port=int(args.ida_port),
+                reserved_ports=reserved_ports,
+            )
+            reserved_ports.add(int(worker_port))
+        cmd = _build_batch_child_cmd(
+            args=args,
+            input_path=target_path,
+            ida_port=worker_port,
+            report_dir=report_dir,
+        )
+        print(f"[BATCH] slot={slot} port={worker_port} start {index}: {target_path}")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PROJECT_ROOT),
+                env=env,
+            )
+            rc = await proc.wait()
+        except Exception as e:
+            rc = 1
+            print(f"[BATCH][ERROR] slot={slot} target={target_path} error={e}")
+        finally:
+            async with port_lock:
+                reserved_ports.discard(int(worker_port))
+        elapsed = time.time() - start
+        print(
+            f"[BATCH] slot={slot} done {index}: rc={rc} elapsed={elapsed:.1f}s target={target_path}"
+        )
+        results.append(
+            {
+                "index": int(index),
+                "target": str(target_path),
+                "rc": int(rc),
+                "elapsed_sec": float(elapsed),
+                "worker_slot": int(slot),
+                "worker_port": int(worker_port),
+                "report_dir": report_dir,
+            }
+        )
+        queue.task_done()
+
+
+async def _run_batch_mode(args: argparse.Namespace, targets: Sequence[str]) -> int:
+    concurrency = max(1, int(args.concurrency))
+    queue: asyncio.Queue[Optional[Tuple[int, str]]] = asyncio.Queue()
+    results: List[Dict[str, Any]] = []
+    port_lock = asyncio.Lock()
+    reserved_ports: set[int] = set()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batch_root = Path(str(args.report_dir or DEFAULT_REPORT_DIR)).resolve() / f"batch_{timestamp}"
+    batch_root.mkdir(parents=True, exist_ok=True)
+
+    for index, target in enumerate(targets, start=1):
+        await queue.put((index, str(target)))
+    for _ in range(concurrency):
+        await queue.put(None)
+
+    workers = [
+        asyncio.create_task(
+            _run_batch_worker(
+                slot=slot,
+                args=args,
+                queue=queue,
+                results=results,
+                batch_root=batch_root,
+                port_lock=port_lock,
+                reserved_ports=reserved_ports,
+            )
+        )
+        for slot in range(concurrency)
+    ]
+
+    await queue.join()
+    await asyncio.gather(*workers)
+
+    ordered = sorted(results, key=lambda row: int(row.get("index", 0)))
+    success_count = sum(1 for row in ordered if int(row.get("rc", 1)) == 0)
+    failed_count = len(ordered) - success_count
+    print("\n" + "=" * 72)
+    print(f"[BATCH] finished total={len(ordered)} success={success_count} failed={failed_count}")
+    print(f"[BATCH] report root: {batch_root}")
+    for row in ordered:
+        print(
+            "[BATCH][RESULT] "
+            f"idx={int(row['index'])} rc={int(row['rc'])} "
+            f"elapsed={float(row['elapsed_sec']):.1f}s "
+            f"port={int(row['worker_port'])} "
+            f"target={row['target']}"
+        )
+    return 0 if failed_count == 0 else 1
+
+
+def _normalize_input_path(args: argparse.Namespace) -> Tuple[int, str, bool]:
+    raw_input_path = str(args.input_path or "").strip()
+    raw_input_dir = str(args.input_dir or "").strip()
+
+    if raw_input_path and raw_input_dir:
+        abs_path = os.path.abspath(raw_input_path)
+        abs_dir = os.path.abspath(raw_input_dir)
+        if abs_path != abs_dir:
+            print("[ERROR] --input-path and --input-dir point to different locations.")
+            return 2, "", False
+
+    merged_raw = raw_input_path or raw_input_dir
+    if not merged_raw:
+        print("[ERROR] Missing --input-path.")
+        return 2, "", False
+
+    merged_path = os.path.abspath(merged_raw)
+    if not os.path.exists(merged_path):
+        print(f"[ERROR] Input path not found: {merged_path}")
+        return 2, "", False
+
+    if int(args.concurrency) <= 0:
+        print("[ERROR] --concurrency must be > 0")
+        return 2, "", False
+
+    is_directory = bool(os.path.isdir(merged_path))
+    if is_directory and str(args.ida_url or "").strip():
+        print("[ERROR] Batch mode does not support --ida-url. Leave it empty.")
+        return 2, "", False
+
+    if raw_input_dir and (not raw_input_path):
+        print("[WARN] --input-dir is deprecated. Use --input-path with a directory path.")
+
+    return 0, merged_path, is_directory
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
+    validate_rc, input_path, is_directory = _normalize_input_path(args)
+    if validate_rc != 0:
+        return int(validate_rc)
+
+    if not is_directory:
+        return _run_single_target(args=args, input_path=input_path, ida_port=int(args.ida_port), report_dir="")
+
+    patterns = [str(item).strip() for item in (args.file_pattern or []) if str(item).strip()] or DEFAULT_BATCH_PATTERNS
+    targets = _discover_batch_targets(
+        input_dir=input_path,
+        recursive=bool(args.recursive),
+        patterns=patterns,
+    )
+    if not targets:
+        print("[ERROR] No binary/IDB targets discovered in input directory.")
+        return 3
+
+    print(
+        f"[BATCH] targets={len(targets)} concurrency={int(args.concurrency)} "
+        f"port_strategy=dynamic(base={int(args.ida_port)}) recursive={bool(args.recursive)}"
+    )
+    for idx, path in enumerate(targets, start=1):
+        print(f"[BATCH][TARGET] {idx}: {path}")
+
+    try:
+        return int(asyncio.run(_run_batch_mode(args, targets)))
+    except KeyboardInterrupt:
+        print("[WARN] batch interrupted by keyboard_interrupt")
+        return 130
 
 
 if __name__ == "__main__":
