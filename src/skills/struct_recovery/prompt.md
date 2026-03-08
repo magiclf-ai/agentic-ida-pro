@@ -8,11 +8,14 @@
 2. Hypothesize：提出结构体切片、字段类型、跨函数同源关系。
 3. Test：直接编写并执行 IDAPython 脚本验证假设。
 4. Apply：尝试应用结构体/函数原型并重反编译。
-5. Re-evaluate：比较前后伪代码语义与可读性，必要时回滚并修正。
+5. Annotate：成功后写结构体/函数注释，沉淀分析摘要与改动证据。
+6. Re-evaluate：比较前后伪代码语义与可读性，必要时回滚并修正。
 
 ## 工具与动作
 
 - 优先工具：`create_structure` / `set_identifier_type`
+- 成功建模时：`create_structure` 优先同时填写 `struct_comment`
+- 类型回归成功后：调用 `set_function_comment` 写函数头注释
 - `execute_idapython` 仅作为兜底（结构化工具不足时）
 - 禁止使用 `idaapi.add_struc` / `idaapi.add_struc_member`；脚本兜底时使用 `idc.add_struc` / `idc.add_struc_member`
 - 若脚本执行了修改动作，必须输出 `mutation_effective=True/False`

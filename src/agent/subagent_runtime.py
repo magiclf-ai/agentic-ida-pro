@@ -366,14 +366,23 @@ class SubAgentRuntime:
                 for idx, row in enumerate(outputs, start=1):
                     tool_call_id = str(row.get("tool_call_id", "") or call_rows[idx - 1].get("id", "") or f"{turn_id}:tool:{idx}")
                     result_text = str(row.get("result", "") or "")
+                    tool_name = str(row.get("tool_name", "") or call_rows[idx - 1].get("name", "") or "")
                     self.core.policy_mgr.append_message(
                         messages=messages,
-                        message_obj=ToolMessage(content=result_text, tool_call_id=tool_call_id),
+                        message_obj=ToolMessage(content=result_text, tool_call_id=tool_call_id, name=tool_name),
                         role="tool",
                         turn_id=turn_id,
                         protected=False,
                     )
             latency_s = time.perf_counter() - interaction_started
+
+            # Extract usage metadata from response
+            usage_metadata = getattr(response, "usage_metadata", None) or {}
+            usage = {}
+            if usage_metadata:
+                usage["input_tokens"] = usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens")
+                usage["output_tokens"] = usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens")
+
             self.core.obs.emit(
                 "llm_interaction",
                 {
@@ -384,6 +393,7 @@ class SubAgentRuntime:
                     "phase": "subagent",
                     "messages": self.core._serialize_messages_for_log(messages),
                     "latency_s": round(latency_s, 4),
+                    "usage": usage if usage.get("input_tokens") or usage.get("output_tokens") else None,
                 },
             )
             if self.core._finalized:

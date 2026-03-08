@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import os
+import re
 import socket
 import signal
 import subprocess
@@ -46,6 +47,14 @@ LIKELY_BINARY_SUFFIXES = {
     ".ko",
     ".o",
     ".a",
+}
+
+IDA_SIDECAR_SUFFIXES = {
+    ".id0",
+    ".id1",
+    ".id2",
+    ".nam",
+    ".til",
 }
 
 LIKELY_TEXT_SUFFIXES = {
@@ -255,6 +264,8 @@ def _is_probably_binary_file(path: Path) -> bool:
 
 def _is_supported_target_file(path: Path) -> bool:
     suffix = path.suffix.lower()
+    if suffix in IDA_SIDECAR_SUFFIXES:
+        return False
     if suffix in LIKELY_BINARY_SUFFIXES:
         return True
     if suffix in LIKELY_TEXT_SUFFIXES:
@@ -262,7 +273,34 @@ def _is_supported_target_file(path: Path) -> bool:
     return _is_probably_binary_file(path)
 
 
+def _cleanup_ida_sidecar_files(root: Path, recursive: bool) -> Dict[str, Any]:
+    base = Path(root).resolve()
+    if not base.exists():
+        return {"deleted_count": 0, "deleted_files": []}
+
+    deleted: List[str] = []
+    iterator = base.rglob("*") if bool(recursive) else base.glob("*")
+    for item in iterator:
+        if not item.is_file():
+            continue
+        if item.suffix.lower() not in IDA_SIDECAR_SUFFIXES:
+            continue
+        try:
+            item.unlink()
+            deleted.append(str(item))
+        except Exception as e:
+            print(f"[WARN] failed to delete sidecar: {item} ({e})")
+
+    if deleted:
+        print(
+            f"[BATCH] deleted {len(deleted)} IDA sidecar files before target discovery "
+            f"under {base}"
+        )
+    return {"deleted_count": len(deleted), "deleted_files": deleted}
+
+
 def _iter_candidate_files(input_dir: Path, recursive: bool, patterns: Sequence[str]) -> List[Path]:
+    root = input_dir.resolve()
     unique: Dict[str, Path] = {}
     for raw_pattern in patterns:
         pattern = str(raw_pattern or "").strip() or "*"
@@ -270,9 +308,58 @@ def _iter_candidate_files(input_dir: Path, recursive: bool, patterns: Sequence[s
         for item in iterator:
             if not item.is_file():
                 continue
+            try:
+                rel_parts = item.resolve().relative_to(root).parts
+            except Exception:
+                rel_parts = ()
+            if any(str(part).lower() == "backups" for part in rel_parts):
+                continue
             key = str(item.resolve())
             unique[key] = item.resolve()
     return [unique[key] for key in sorted(unique.keys())]
+
+
+def _looks_like_generated_idb(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix not in {".i64", ".idb", ".i32"}:
+        return False
+    name = path.name
+    return bool(re.search(r"_\d{14}(?:_[A-Za-z0-9._-]+)?\.(i64|idb|i32)$", name, flags=re.IGNORECASE))
+
+
+def _organize_generated_idb_files(root: Path, recursive: bool) -> Dict[str, Any]:
+    base = root.resolve()
+    moved: List[str] = []
+    iterator = base.rglob("*") if bool(recursive) else base.glob("*")
+    for item in iterator:
+        if not item.is_file():
+            continue
+        if not _looks_like_generated_idb(item):
+            continue
+        try:
+            rel_parts = item.resolve().relative_to(base).parts
+        except Exception:
+            rel_parts = ()
+        if any(str(part).lower() == "backups" for part in rel_parts):
+            continue
+
+        backup_dir = item.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target = backup_dir / item.name
+        if target.exists():
+            stem = target.stem
+            suffix = target.suffix
+            nonce = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = backup_dir / f"{stem}_moved_{nonce}{suffix}"
+        try:
+            item.rename(target)
+            moved.append(f"{item} -> {target}")
+        except Exception as e:
+            print(f"[WARN] failed to move generated idb into backups: {item} ({e})")
+
+    if moved:
+        print(f"[BATCH] moved {len(moved)} generated idb files into backups")
+    return {"moved_count": len(moved), "moved": moved}
 
 
 def _discover_batch_targets(
@@ -281,11 +368,24 @@ def _discover_batch_targets(
     patterns: Sequence[str],
 ) -> List[str]:
     root = Path(str(input_dir or "").strip()).resolve()
+    _organize_generated_idb_files(root, recursive=bool(recursive))
+    _cleanup_ida_sidecar_files(root, recursive=bool(recursive))
     candidates = _iter_candidate_files(root, recursive=bool(recursive), patterns=patterns)
-    targets: List[str] = []
+    by_key: Dict[str, Dict[str, Any]] = {}
     for item in candidates:
-        if _is_supported_target_file(item):
-            targets.append(str(item))
+        if not _is_supported_target_file(item):
+            continue
+        suffix = item.suffix.lower()
+        is_idb = suffix in {".i64", ".idb", ".i32"}
+        key = item.stem if suffix else item.name
+        prev = by_key.get(key)
+        if prev is None:
+            by_key[key] = {"path": str(item), "is_idb": bool(is_idb)}
+            continue
+        if is_idb and (not bool(prev.get("is_idb", False))):
+            by_key[key] = {"path": str(item), "is_idb": True}
+
+    targets: List[str] = [str(row["path"]) for _k, row in sorted(by_key.items(), key=lambda kv: kv[0])]
     return targets
 
 
@@ -623,6 +723,13 @@ def main() -> int:
         return int(validate_rc)
 
     if not is_directory:
+        single_suffix = Path(input_path).suffix.lower()
+        if single_suffix in IDA_SIDECAR_SUFFIXES:
+            print(
+                "[ERROR] input-path points to IDA sidecar file "
+                f"({single_suffix}). Use .i64/.idb/.i32 main database file instead: {input_path}"
+            )
+            return 2
         return _run_single_target(args=args, input_path=input_path, ida_port=int(args.ida_port), report_dir="")
 
     patterns = [str(item).strip() for item in (args.file_pattern or []) if str(item).strip()] or DEFAULT_BATCH_PATTERNS

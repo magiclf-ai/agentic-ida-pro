@@ -111,6 +111,31 @@ def _normalize_path(path: str) -> str:
     return os.path.abspath(str(path or "").strip())
 
 
+def _is_idb_path(path: str) -> bool:
+    suffix = os.path.splitext(str(path or ""))[1].lower()
+    return suffix in {".i64", ".idb", ".i32"}
+
+
+def _default_idb_path_for_binary(binary_path: str) -> str:
+    normalized = _normalize_path(binary_path)
+    folder = os.path.dirname(normalized) or "."
+    base = os.path.basename(normalized)
+    stem, _ext = os.path.splitext(base)
+    if not stem:
+        stem = base
+    return _normalize_path(os.path.join(folder, f"{stem}.i64"))
+
+
+def _save_current_database_as(target_path: str) -> str:
+    normalized = _normalize_path(target_path)
+    folder = os.path.dirname(normalized) or "."
+    os.makedirs(folder, exist_ok=True)
+    ok = bool(idc.save_database(normalized, 0))
+    if not ok:
+        raise RuntimeError(f"save_database failed: {normalized}")
+    return str(idc.get_idb_path() or normalized).strip()
+
+
 def _set_db_opened(path: str):
     _db_state["opened"] = True
     _db_state["path"] = str(path or "").strip()
@@ -184,9 +209,15 @@ def _open_database_locked(
     if not input_path:
         raise RuntimeError("Missing input path.")
 
-    normalized_path = _normalize_path(input_path)
-    if not os.path.exists(normalized_path):
-        raise RuntimeError(f"Input file not found: {normalized_path}")
+    normalized_input_path = _normalize_path(input_path)
+    if not os.path.exists(normalized_input_path):
+        raise RuntimeError(f"Input file not found: {normalized_input_path}")
+
+    resolved_open_path = normalized_input_path
+    if not _is_idb_path(normalized_input_path):
+        preferred_idb = _default_idb_path_for_binary(normalized_input_path)
+        if os.path.exists(preferred_idb):
+            resolved_open_path = preferred_idb
 
     switched_from = ""
     close_result = None
@@ -194,7 +225,7 @@ def _open_database_locked(
 
     if _db_state["opened"]:
         current_path = str(idc.get_idb_path() or _db_state.get("path") or "").strip()
-        if current_path and _normalize_path(current_path) == normalized_path:
+        if current_path and _normalize_path(current_path) == _normalize_path(resolved_open_path):
             already_open = True
         else:
             switched_from = current_path
@@ -207,15 +238,29 @@ def _open_database_locked(
             "already_open": True,
             "switched_from": "",
             "close_result": None,
-            "cleanup_result": {"directory": os.path.dirname(normalized_path), "deleted_count": 0, "deleted_files": []},
+            "normalized_input_path": normalized_input_path,
+            "resolved_open_path": resolved_open_path,
+            "initialized_idb_path": "",
+            "cleanup_result": {"directory": os.path.dirname(resolved_open_path), "deleted_count": 0, "deleted_files": []},
         }
 
-    cleanup_result = _cleanup_unpacked_idb_files_in_dir(normalized_path)
+    cleanup_result = {"directory": os.path.dirname(resolved_open_path), "deleted_count": 0, "deleted_files": []}
+    if not _is_idb_path(resolved_open_path):
+        cleanup_result = _cleanup_unpacked_idb_files_in_dir(resolved_open_path)
+
     started = time.time()
-    open_ret = idapro.open_database(normalized_path, bool(run_auto_analysis))
+    open_ret = idapro.open_database(resolved_open_path, bool(run_auto_analysis))
     if bool(open_ret):
-        raise RuntimeError(f"idapro.open_database failed with code: {open_ret}")
-    active_path = str(idc.get_idb_path() or normalized_path).strip()
+        raise RuntimeError(f"idapro.open_database failed with code: {open_ret} (path={resolved_open_path})")
+    active_path = str(idc.get_idb_path() or resolved_open_path).strip()
+
+    initialized_idb_path = ""
+    if not _is_idb_path(resolved_open_path):
+        preferred_idb = _default_idb_path_for_binary(normalized_input_path)
+        if _normalize_path(active_path) != _normalize_path(preferred_idb):
+            active_path = _save_current_database_as(preferred_idb)
+        initialized_idb_path = _normalize_path(preferred_idb)
+
     _set_db_opened(active_path)
     elapsed = time.time() - started
     logger.info(
@@ -230,6 +275,9 @@ def _open_database_locked(
         "already_open": False,
         "switched_from": switched_from,
         "close_result": close_result,
+        "normalized_input_path": normalized_input_path,
+        "resolved_open_path": resolved_open_path,
+        "initialized_idb_path": initialized_idb_path,
         "cleanup_result": cleanup_result,
     }
 

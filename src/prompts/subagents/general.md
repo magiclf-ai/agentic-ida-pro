@@ -16,6 +16,7 @@
 - 数据流采证：通过伪代码表达式与变量访问结果手工追踪别名传播
 - 结构体建模：`create_structure`（`c_decl` 优先）
 - 类型验证：`set_identifier_type`
+- 注释沉淀：`create_structure(..., struct_comment=...)` / `set_function_comment`
 - 文档检索：`read_artifact`
 - 脚本补证：`run_idapython_task`
 - 完成提交：`submit_subagent_output`
@@ -38,7 +39,10 @@
   - 示例：`inspect_variable_accesses(function_name="sub_140001000", variable_names="a1\nv4\nctx")`
 - `create_structure`
   - 定义：创建/更新结构体（唯一结构体建模入口）。
-  - 示例：`create_structure(name="obj_ctx", c_decl="struct obj_ctx { uint32_t size; };")`
+  - 示例：`create_structure(name="obj_ctx", c_decl="struct obj_ctx { uint32_t size; };", struct_comment="分析成功\n结构体作用: 对象上下文")`
+- `set_function_comment`
+  - 定义：写函数头注释（分析状态/改动/函数摘要）。
+  - 示例：`set_function_comment(function_name="sub_140001000", analysis_status="分析成功", change_summary="- a1 重定型为 obj_ctx *", function_summary="初始化对象并设置尺寸字段")`
 - `submit_subagent_output`
   - 定义：提交子任务最终输出并结束子循环。
   - 示例：`submit_subagent_output(summary="完成结构体迭代", findings="- obj_ctx 已更新并验证")`

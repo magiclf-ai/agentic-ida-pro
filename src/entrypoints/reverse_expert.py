@@ -294,6 +294,7 @@ def _build_acceptance_summary_markdown(
     session_id: str,
     session_db_path: str,
     backup_info: Dict[str, Any],
+    post_backup_info: Dict[str, Any],
     snapshot_before: Dict[str, Any],
     snapshot_after: Dict[str, Any],
     struct_summary: Dict[str, Any],
@@ -312,9 +313,14 @@ def _build_acceptance_summary_markdown(
         f"- request: {request}",
         "",
         "## IDB Backup",
-        f"- source_path: {backup_info.get('source_path', '')}",
-        f"- backup_path: {backup_info.get('backup_path', '')}",
-        f"- method: {backup_info.get('method', '')}",
+        "- pre_recovery:",
+        f"  - source_path: {backup_info.get('source_path', '')}",
+        f"  - backup_path: {backup_info.get('backup_path', '')}",
+        f"  - method: {backup_info.get('method', '')}",
+        "- post_recovery:",
+        f"  - source_path: {post_backup_info.get('source_path', '')}",
+        f"  - backup_path: {post_backup_info.get('backup_path', '')}",
+        f"  - method: {post_backup_info.get('method', '')}",
         "",
         "## IDA Snapshots",
         f"- before_snapshot_desc: {(snapshot_before.get('snapshot') or {}).get('desc', '')}",
@@ -428,6 +434,7 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
     print("[INFO] Loop mode: single_policy_loop")
 
     backup_info: Dict[str, Any] = {}
+    post_backup_info: Dict[str, Any] = {}
     snapshot_before: Dict[str, Any] = {}
     snapshot_after: Dict[str, Any] = {}
     try:
@@ -522,6 +529,18 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
     after_structs = await _snapshot_structs(agent)
     print(f"[INFO] AFTER structs: {after_structs.get('count', 0)}")
 
+    try:
+        post_backup_info = await _backup_idb(
+            agent=agent,
+            backup_dir="",
+            backup_tag="post_recovery",
+            backup_filename="",
+        )
+        print(f"[INFO] Post-recovery IDB backup created: {post_backup_info.get('backup_path', '')}")
+    except Exception as e:
+        print(f"[WARN] Post-recovery IDB backup failed: {e}")
+        post_backup_info = {}
+
     session_id = agent.get_last_session_id()
     session_db = agent.get_session_db_path()
     report_dir = _report_dir(args.report_dir, session_id)
@@ -530,6 +549,7 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
     _write_text(os.path.join(report_dir, "before_structs.json"), json.dumps(before_structs, ensure_ascii=False, indent=2))
     _write_text(os.path.join(report_dir, "after_structs.json"), json.dumps(after_structs, ensure_ascii=False, indent=2))
     _write_text(os.path.join(report_dir, "idb_backup.json"), json.dumps(backup_info, ensure_ascii=False, indent=2))
+    _write_text(os.path.join(report_dir, "idb_post_backup.json"), json.dumps(post_backup_info, ensure_ascii=False, indent=2))
     _write_text(os.path.join(report_dir, "ida_snapshot_before.json"), json.dumps(snapshot_before, ensure_ascii=False, indent=2))
     _write_text(os.path.join(report_dir, "ida_snapshot_after.json"), json.dumps(snapshot_after, ensure_ascii=False, indent=2))
 
@@ -594,6 +614,7 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
         "session_id": session_id,
         "session_db": session_db,
         "backup": backup_info,
+        "post_backup": post_backup_info,
         "snapshot_before": snapshot_before,
         "snapshot_after": snapshot_after,
         "struct_summary": summary,
@@ -621,6 +642,7 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
         session_id=str(session_id or ""),
         session_db_path=str(session_db or ""),
         backup_info=backup_info,
+        post_backup_info=post_backup_info,
         snapshot_before=snapshot_before,
         snapshot_after=snapshot_after,
         struct_summary=summary,

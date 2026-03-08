@@ -240,10 +240,11 @@ bash src/entrypoints/run_ida_service.sh
 1. `search` / `xref` 缩小函数范围  
 2. `decompile_function` 获取伪代码  
 3. `inspect_variable_accesses` 获取变量访问与偏移证据  
-4. `create_structure(name, c_decl)` 创建或更新结构体  
+4. `create_structure(..., struct_comment=...)` 创建/更新结构体并写结构体注释  
 5. `set_identifier_type` 应用类型并重反编译  
-6. 更新任务状态  
-7. 重复直到任务板闭环，再 `submit_output`
+6. `set_function_comment` 写函数头分析摘要  
+7. 更新任务状态  
+8. 重复直到任务板闭环，再 `submit_output`
 
 ---
 
@@ -253,6 +254,7 @@ bash src/entrypoints/run_ida_service.sh
 - 证据采集：`decompile_function`, `inspect_variable_accesses`, `expand_call_path`
 - 建模：`create_structure`
 - 类型应用：`set_identifier_type`
+- 注释沉淀：`set_function_comment`（函数头），`create_structure(..., struct_comment=...)`（结构体）
 - 深度补证：`run_idapython_task`
 - 任务管理：`create_task`, `set_task_status`, `get_task_board`
 - 最终提交：`submit_output`

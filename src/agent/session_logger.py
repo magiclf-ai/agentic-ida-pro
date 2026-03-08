@@ -332,11 +332,14 @@ class AgentSessionLogger:
                 usage = payload.get("usage", {})
                 latency_s = payload.get("latency_s")
                 if usage or latency_s is not None:
+                    # Support both OpenAI format (prompt_tokens/completion_tokens) and unified format (input_tokens/output_tokens)
+                    input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                    output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") if isinstance(usage, dict) else None
                     self._update_turn_complete(
                         turn_id,
                         status="completed",
-                        input_tokens=usage.get("input_tokens") if isinstance(usage, dict) else None,
-                        output_tokens=usage.get("output_tokens") if isinstance(usage, dict) else None,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
                         latency_s=latency_s,
                     )
 

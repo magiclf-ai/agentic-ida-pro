@@ -637,6 +637,37 @@ else:
             or result.get("error")
             or "Failed to set identifier type and redecompile"
         )
+
+    def set_function_comment(
+        self,
+        function_name: str,
+        analysis_status: str,
+        change_summary: str,
+        function_summary: str,
+        repeatable: bool = True,
+    ) -> Dict[str, Any]:
+        """在函数头注释中写入 LLM 分析记录。"""
+        script = self._render_script_template(
+            "set_function_comment.py",
+            {
+                "FUNCTION_NAME": str(function_name),
+                "ANALYSIS_STATUS": str(analysis_status or ""),
+                "CHANGE_SUMMARY": str(change_summary or ""),
+                "FUNCTION_SUMMARY": str(function_summary or ""),
+                "REPEATABLE": bool(repeatable),
+            },
+        )
+        result = self.execute_script(script=script)
+        if result.get("success"):
+            payload = result.get("result")
+            if isinstance(payload, dict):
+                return payload
+            raise Exception(f"Unexpected set_function_comment payload type: {type(payload).__name__}")
+        raise Exception(
+            result.get("stderr")
+            or result.get("error")
+            or "Failed to annotate function comment"
+        )
     
     def get_function_info(self, name: Optional[str] = None, addr: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -759,8 +790,9 @@ else:
         name: str,
         c_decl: str = "",
         fields: Optional[List[Dict[str, Any]]] = None,
+        struct_comment: str = "",
     ) -> Dict[str, Any]:
-        """创建或更新结构体并返回详细结果。"""
+        """创建或更新结构体并返回详细结果（可选写入结构体注释）。"""
         normalized_fields: List[Dict[str, Any]] = []
         for field in (fields or []):
             if not isinstance(field, dict):
@@ -784,6 +816,7 @@ else:
                 "STRUCT_NAME": str(name),
                 "C_DECL": str(rendered_c_decl),
                 "FIELDS": normalized_fields,
+                "STRUCT_COMMENT": str(struct_comment or ""),
             },
         )
         result = self.execute_script(script)
@@ -833,6 +866,7 @@ else:
         name: str,
         c_decl: str = "",
         fields: Optional[List[Dict[str, Any]]] = None,
+        struct_comment: str = "",
     ) -> bool:
         """
         创建或更新结构体
@@ -841,11 +875,17 @@ else:
             name: 结构体名称
             c_decl: 完整 C 结构体声明
             fields: 兼容模式字段列表，会转换为 C 声明
+            struct_comment: 结构体注释（写入 repeatable struct comment）
             
         Returns:
             是否成功
         """
-        data = self.create_structure_detailed(name=name, c_decl=c_decl, fields=fields)
+        data = self.create_structure_detailed(
+            name=name,
+            c_decl=c_decl,
+            fields=fields,
+            struct_comment=struct_comment,
+        )
         if not isinstance(data, dict):
             return False
         if not bool(data.get("success", False)):

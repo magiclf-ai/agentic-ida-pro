@@ -114,7 +114,8 @@ class PolicyManager:
         elif isinstance(message_obj, ToolMessage):
             final_obj = ToolMessage(
                 content=content_text,
-                tool_call_id=str(getattr(message_obj, "tool_call_id", "") or "")
+                tool_call_id=str(getattr(message_obj, "tool_call_id", "") or ""),
+                name=str(getattr(message_obj, "name", "") or "")
             )
         else:
             final_obj = HumanMessage(content=content_text)

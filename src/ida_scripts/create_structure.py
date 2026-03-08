@@ -9,6 +9,10 @@ import ida_typeinf
 struct_name = __STRUCT_NAME__
 c_decl = __C_DECL__
 fields = __FIELDS__
+struct_comment = __STRUCT_COMMENT__
+
+LLM_STRUCT_BEGIN = "[LLM_STRUCT_NOTE_BEGIN]"
+LLM_STRUCT_END = "[LLM_STRUCT_NOTE_END]"
 
 
 def _member_decl(size):
@@ -189,6 +193,73 @@ def _set_named_struct_type(tif, name):
     return False, rc_int, err_text
 
 
+def _strip_llm_struct_block(text):
+    value = str(text or "")
+    pattern = re.compile(
+        r"\n?\[LLM_STRUCT_NOTE_BEGIN\].*?\[LLM_STRUCT_NOTE_END\]\n?",
+        flags=re.DOTALL,
+    )
+    stripped = re.sub(pattern, "\n", value)
+    return str(stripped or "").strip()
+
+
+def _merge_struct_comment(existing, llm_comment):
+    llm_text = str(llm_comment or "").strip()
+    base = _strip_llm_struct_block(existing)
+    if not llm_text:
+        return base
+    block = f"{LLM_STRUCT_BEGIN}\n{llm_text}\n{LLM_STRUCT_END}".strip()
+    if not base:
+        return block
+    return f"{base}\n\n{block}".strip()
+
+
+def _apply_struct_comment(sid, comment_text):
+    target = str(comment_text or "").strip()
+    if not target:
+        return True, False, "", ""
+
+    before = str(_get_struc_comment_compat(sid) or "")
+    merged = _merge_struct_comment(before, target)
+    if merged == before:
+        return True, False, before, merged
+
+    ok = bool(_set_struc_comment_compat(sid, merged))
+    if not ok:
+        return False, False, before, merged
+
+    after = str(_get_struc_comment_compat(sid) or "")
+    changed = bool(after != before)
+    return True, changed, before, after
+
+
+def _get_struc_comment_compat(sid):
+    try:
+        return idc.get_struc_cmt(sid, 1)
+    except TypeError:
+        pass
+    except Exception:
+        pass
+    try:
+        return idc.get_struc_cmt(sid)
+    except Exception:
+        return ""
+
+
+def _set_struc_comment_compat(sid, comment_text):
+    text = str(comment_text or "")
+    try:
+        return bool(idc.set_struc_cmt(sid, text, 1))
+    except TypeError:
+        pass
+    except Exception:
+        pass
+    try:
+        return bool(idc.set_struc_cmt(sid, text))
+    except Exception:
+        return False
+
+
 def _run():
     final_name = str(struct_name or "").strip()
     final_c_decl = str(c_decl or "").strip()
@@ -241,6 +312,11 @@ def _run():
     created_struct = bool((not struct_existed) and struct_visible)
     after_sig = _struct_signature(after_sid) if struct_visible else []
     mutation_effective = bool(created_struct or (before_sig != after_sig))
+    comment_requested = bool(str(struct_comment or "").strip())
+    comment_apply_ok = True
+    comment_changed = False
+    comment_before = ""
+    comment_after = ""
 
     result = {
         "success": bool(save_ok),
@@ -253,6 +329,9 @@ def _run():
         "applied_with": "tinfo_t.set_named_type",
         "set_named_type_rc": int(save_rc),
         "input_c_decl": str(final_c_decl),
+        "comment_requested": bool(comment_requested),
+        "comment_apply_ok": bool(comment_apply_ok),
+        "comment_changed": bool(comment_changed),
     }
 
     if save_ok:
@@ -261,6 +340,21 @@ def _run():
                 result["c_declaration"] = _render_struct_c(after_sid, final_name)
             except Exception:
                 result["c_declaration"] = str(final_c_decl)
+            if comment_requested:
+                comment_apply_ok, comment_changed, comment_before, comment_after = _apply_struct_comment(
+                    after_sid,
+                    struct_comment,
+                )
+                result["comment_apply_ok"] = bool(comment_apply_ok)
+                result["comment_changed"] = bool(comment_changed)
+                result["comment_before"] = str(comment_before or "")
+                result["comment_after"] = str(comment_after or "")
+                if not comment_apply_ok:
+                    result["success"] = False
+                    result["error"] = "set_struc_cmt failed"
+                    result["mutation_effective"] = bool(mutation_effective)
+                    return result
+                result["mutation_effective"] = bool(mutation_effective or comment_changed)
         else:
             result["success"] = False
             result["error"] = "type saved but IDB struct was not synchronized"

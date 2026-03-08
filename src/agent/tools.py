@@ -651,10 +651,62 @@ def set_identifier_type(
 
 
 @tool(parse_docstring=True, error_on_invalid_docstring=True)
+def set_function_comment(
+    function_name: str,
+    analysis_status: str,
+    change_summary: str,
+    function_summary: str,
+    repeatable: bool = True,
+) -> str:
+    """
+    在目标函数头部写入/更新 LLM 分析注释
+
+    Args:
+        function_name: 目标函数名
+        analysis_status: 分析状态摘要（如“分析成功”）
+        change_summary: 本轮改动摘要
+        function_summary: 函数语义摘要
+        repeatable: 是否写入可重复注释槽
+
+    Returns:
+        注释写入结果（包含 mutation_effective）
+    """
+    client = get_ida_client()
+    try:
+        data = client.set_function_comment(
+            function_name=function_name,
+            analysis_status=analysis_status,
+            change_summary=change_summary,
+            function_summary=function_summary,
+            repeatable=repeatable,
+        )
+        if not bool(data.get("success", False)):
+            return f"ERROR: {data.get('error', 'annotate function comment failed')}"
+
+        ea_value = data.get("ea")
+        ea_text = f"0x{int(ea_value):x}" if isinstance(ea_value, int) and int(ea_value) > 0 else "unknown"
+        lines = [
+            f"已更新函数注释：{function_name} @ {ea_text}",
+            f"mutation_effective={str(bool(data.get('mutation_effective', False))).lower()}",
+            f"comment_changed={str(bool(data.get('comment_changed', False))).lower()}",
+            f"repeatable={str(bool(data.get('repeatable', repeatable))).lower()}",
+        ]
+        comment_after = str(data.get("comment_after", "") or "").strip()
+        if comment_after:
+            lines.append("```text")
+            lines.append(_format_stream(comment_after, max_chars=1800))
+            lines.append("```")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"ERROR: annotate function comment failed: {str(e)}"
+
+
+@tool(parse_docstring=True, error_on_invalid_docstring=True)
 def create_structure(
     name: str,
     c_decl: str = "",
     fields: Optional[List[Dict[str, Any]]] = None,
+    struct_comment: str = "",
 ) -> str:
     """
     创建或更新 IDA 中的结构体定义（C 声明优先）
@@ -663,6 +715,7 @@ def create_structure(
         name: 结构体名称
         c_decl: 完整 C 结构体声明，例如 "struct Foo { uint32_t a; };"
         fields: 兼容字段列表。若未提供 c_decl，会尝试由 fields 生成声明。
+        struct_comment: 结构体注释文本（可选，会写入 set_struc_cmt）
     
     Returns:
         创建结果（包含 C 声明与 mutation_effective）
@@ -678,17 +731,25 @@ def create_structure(
                 "Example: create_structure(name='my_struct', c_decl='struct my_struct { uint32_t field0; };')."
             )
 
-        data = client.create_structure_detailed(name=name, c_decl=c_decl, fields=fields or [])
+        data = client.create_structure_detailed(
+            name=name,
+            c_decl=c_decl,
+            fields=fields or [],
+            struct_comment=struct_comment,
+        )
         if not bool(data.get("success", False)):
             return f"ERROR: {data.get('error', 'create structure failed')}"
 
         rendered = str(data.get("c_declaration", "") or "").strip()
         if not rendered:
             return f"ERROR: structure '{name}' updated but failed to render C declaration"
-        return (
-            f"{rendered}\n"
-            f"mutation_effective={str(bool(data.get('mutation_effective', False))).lower()}"
-        )
+        lines = [
+            rendered,
+            f"mutation_effective={str(bool(data.get('mutation_effective', False))).lower()}",
+        ]
+        if bool(data.get("comment_requested", False)):
+            lines.append(f"struct_comment_changed={str(bool(data.get('comment_changed', False))).lower()}")
+        return "\n".join(lines)
     except Exception as e:
         return f"ERROR: creating structure failed: {str(e)}"
 
@@ -1330,6 +1391,7 @@ CORE_TOOLS = [
     inspect_variable_accesses,
     create_structure,
     set_identifier_type,
+    set_function_comment,
     expand_call_path,
 ]
 
