@@ -1,6 +1,6 @@
 # Agentic IDA Pro
 
-一个面向 **IDA Pro 9.3** 的 LLM 主导逆向分析平台，聚焦“关键函数分析 + 结构体恢复 + 证据链闭环”。
+一个面向 **IDA Pro 9.3** 的 LLM 主导逆向分析平台，聚焦“结构体恢复 + 攻击面发现 + 通用逆向分析”。
 
 ---
 
@@ -19,6 +19,8 @@
 - 关键函数伪代码证据采集（`decompile_function` / `inspect_variable_accesses`）
 - 结构体创建与迭代（`create_structure`）
 - 类型应用与重反编译验证（`set_identifier_type`）
+- 攻击面入口点识别与分类（`search` / `xref` / `expand_call_path`）
+- 自主函数优先级排序与行为归纳（`list_functions` / `spawn_subagent`）
 - 任务闭环与证据链输出（`create_task` / `set_task_status` / `submit_output`）
 
 ---
@@ -26,6 +28,7 @@
 ## 2. 核心特性
 
 - LLM 主导单循环：观察 -> 规划 -> 调工具 -> 取证 -> 更新任务/知识 -> 再决策
+- 统一主 Runtime：`struct_recovery` / `attack_surface` / `general_reverse` 共用一个 loop
 - 结构体恢复强约束：只允许通过 `create_structure` 建模
 - 强制验证闭环：结构体创建后必须类型应用并重反编译
 - 任务板原生支持：`todo/in_progress/blocked/done` 可追踪
@@ -36,28 +39,68 @@
 
 ## 3. 架构概览
 
+### 3.1 整体架构
+
 ```text
 User Request
    |
    v
-reverse_expert.py
+reverse_agent.py (统一入口)
    |
    v
-StructRecoveryAgentCore (LLM policy loop)
-   |                    \
-   |                     \--> TaskBoard / WorkingKnowledge / ContextDistiller
-   v
-Tool Layer (search/xref/decompile/create_structure/set_identifier_type/...)
+reverse_agent_service.py (服务管理层)
+   |
+   +-- 启动 ida_service.daemon (子进程)
+   +-- 调用 reverse_expert.py (主分析流程)
    |
    v
-IDAClient (HTTP)
+ReverseAgentCore (Profile 分发器)
+   |
+   +-- struct_recovery  ──┐
+   +-- attack_surface   ──┼──> ReverseRuntimeCore (统一运行时)
+   +-- general_reverse  ──┘         |
+                                    +-- PolicyManager (LLM 策略循环)
+                                    +-- TaskBoard (任务管理)
+                                    +-- KnowledgeManager (知识库)
+                                    +-- SubAgentManager (子 Agent 管理)
+                                    +-- ContextDistiller (上下文压缩)
+                                    +-- ObservabilityHub (可观测性)
    |
    v
-ida_service.daemon (IDA 进程内串行执行 IDAPython)
+Tool Layer (ExpertToolRegistry)
+   |
+   +-- search / xref / list_functions
+   +-- decompile_function / inspect_variable_accesses
+   +-- create_structure / set_identifier_type
+   +-- expand_call_path / spawn_subagent
+   +-- create_task / set_task_status
+   +-- submit_output / submit_attack_surface_output / submit_reverse_analysis_output
+   |
+   v
+IDAClient (HTTP 客户端)
+   |
+   v
+ida_service.daemon (IDA 进程内 HTTP 服务)
+   |
+   +-- /execute (执行 IDAPython 脚本)
+   +-- /decompile (反编译函数)
+   +-- /search (搜索符号/字符串)
+   +-- /xrefs (交叉引用)
+   +-- /db/open|close|backup (数据库管理)
    |
    v
 IDB / Hex-Rays / IDA APIs
 ```
+
+### 3.2 核心组件说明
+
+- **ReverseAgentCore**：Profile 分发器，根据 `--agent-profile` 参数路由到对应的系统提示词
+- **ReverseRuntimeCore**：统一的 LLM 驱动运行时，所有 profile 共享同一个 tool-call loop
+- **StructRecoveryAgentCore**：结构体恢复特化版本（向后兼容，内部使用 ReverseRuntimeCore）
+- **PolicyManager**：管理 LLM 对话历史、上下文压缩、工具调用循环
+- **TaskBoard**：任务板管理（todo/in_progress/blocked/done）
+- **SubAgentManager**：管理子 Agent 生命周期（函数摘要、参数分析、攻击面分诊等）
+- **ExpertToolRegistry**：工具注册表，支持 profile 级别的工具过滤
 
 ---
 
@@ -66,15 +109,65 @@ IDB / Hex-Rays / IDA APIs
 ```text
 .
 ├── src/
-│   ├── agent/                     # Agent 核心（LLM loop、任务板、日志、提示词加载）
-│   ├── ida_service/               # IDA HTTP 服务（在 IDA 进程内运行）
-│   ├── ida_scripts/               # 可复用 IDAPython 模板
+│   ├── agent/                     # Agent 核心模块
+│   │   ├── reverse_agent_core.py      # Profile 分发器
+│   │   ├── reverse_runtime_core.py    # 统一运行时核心
+│   │   ├── struct_recovery_agent.py   # 结构体恢复特化版本
+│   │   ├── policy_manager.py          # LLM 策略管理
+│   │   ├── task_board.py              # 任务板管理
+│   │   ├── knowledge_manager.py       # 知识库管理
+│   │   ├── subagent_manager.py        # 子 Agent 管理
+│   │   ├── context_distiller.py       # 上下文压缩
+│   │   ├── observability.py           # 可观测性 Hub
+│   │   ├── tool_registry.py           # 工具注册表
+│   │   ├── tools.py                   # 工具定义与实现
+│   │   ├── ida_client.py              # IDA HTTP 客户端
+│   │   ├── idapython_agent.py         # IDAPython 任务 Agent
+│   │   └── ...                        # 其他辅助模块
 │   ├── prompts/                   # 系统提示词与子 Agent 提示词
-│   ├── entrypoints/               # 启动入口、服务入口、验收入口
-│   └── skills/                    # 技能定义（struct_recovery/function_analysis/string_decrypt）
+│   │   ├── agent/                     # 主 Agent 系统提示词
+│   │   │   ├── reverse_expert_system.md       # 结构体恢复系统提示词
+│   │   │   ├── attack_surface_system.md       # 攻击面分析系统提示词
+│   │   │   └── general_reverse_system.md      # 通用逆向系统提示词
+│   │   ├── subagents/                 # 子 Agent 提示词
+│   │   │   ├── function_summary_agent.md      # 函数摘要 Agent
+│   │   │   ├── function_behavior_summary.md   # 函数行为摘要
+│   │   │   ├── parameter_control_summary.md   # 参数控制分析
+│   │   │   ├── surface_candidate_triage.md    # 攻击面候选分诊
+│   │   │   ├── surface_deep_dive.md           # 攻击面深度分析
+│   │   │   ├── idapython_executor.md          # IDAPython 执行器
+│   │   │   └── ...                            # 其他子 Agent
+│   │   ├── distiller/                 # 上下文压缩提示词
+│   │   └── fragments/                 # 可复用提示词片段
+│   ├── ida_service/               # IDA HTTP 服务（在 IDA 进程内运行）
+│   │   ├── daemon.py                  # 服务主入口
+│   │   ├── executor.py                # IDAPython 执行器
+│   │   ├── search_core.py             # 搜索核心
+│   │   └── ...
+│   ├── ida_scripts/               # 可复用 IDAPython 脚本模板
+│   │   ├── create_structure.py        # 结构体创建
+│   │   ├── set_identifier_type.py     # 类型应用
+│   │   ├── inspect_variable_accesses.py  # 变量访问分析
+│   │   ├── expand_call_path.py        # 调用路径展开
+│   │   └── skills/                    # 技能专用脚本
+│   ├── entrypoints/               # 启动入口
+│   │   ├── reverse_agent_service.py   # 服务管理入口
+│   │   ├── reverse_expert.py          # 主分析流程
+│   │   ├── logs.py                    # 日志服务
+│   │   └── observability_api.py       # 可观测性 API
+│   └── skills/                    # 技能定义
+│       ├── struct_recovery/           # 结构体恢复技能
+│       ├── function_analysis/         # 函数分析技能
+│       └── string_decrypt/            # 字符串解密技能
 ├── frontend/observability/        # 可观测性前端 (Vue)
+│   ├── src/
+│   │   ├── components/                # Vue 组件
+│   │   └── ...
+│   └── package.json
 ├── logs/                          # 会话日志、报告产物
-└── test_binaries/                 # 示例二进制/IDB（含 suite_v2 复杂样例）
+│   ├── agent_reports/                 # Agent 分析报告
+│   └── agent_sessions/                # 会话可观测性数据库
+└── reverse_agent.py               # 根目录统一入口
 ```
 
 ---
@@ -107,7 +200,7 @@ python3 -m venv .venv
 
 ## 7. LLM 配置
 
-项目强约束模型为 `gpt-5.2`（`reverse_expert.py` 与 `struct_recovery_agent.py` / `reverse_agent_core.py` 均会校验）。
+项目强约束模型为 `gpt-5.2`（运行时会校验）。
 
 ```bash
 export OPENAI_API_KEY='your-api-key-1'
@@ -129,7 +222,7 @@ OPENAI_MODEL='gpt-5.2' \
 PYTHONPATH=src .venv/bin/python reverse_agent.py \
     --input-path /abs/path/to/target.i64 \
     --request "分析关键函数并恢复结构体定义，给出证据链" \
-    --agent-core dispatcher \
+    --agent-profile struct_recovery \
     --max-iterations 40
 ```
 
@@ -155,7 +248,7 @@ PYTHONPATH=src .venv/bin/python reverse_agent.py \
     --concurrency 3 \
     --ida-port 5000 \
     --request "批量分析并恢复关键结构体，输出证据链" \
-    --agent-core dispatcher \
+    --agent-profile struct_recovery \
     --max-iterations 40
 ```
 
@@ -166,7 +259,90 @@ PYTHONPATH=src .venv/bin/python reverse_agent.py \
 - 批量模式下端口为动态分配（从 `--ida-port` 起寻找可用端口），避免并发冲突
 - 建议端口区间预留充足，避免与本机其他服务冲突
 
-### 8.3 仅启动 IDA Service（可选）
+### 8.3 Profile 选择
+
+```bash
+# 结构体恢复（默认）
+PYTHONPATH=src .venv/bin/python reverse_agent.py \
+    --input-path /abs/path/to/target.i64 \
+    --request "恢复关键结构体并完成类型应用验证" \
+    --agent-profile struct_recovery
+
+# 攻击面分析
+PYTHONPATH=src .venv/bin/python reverse_agent.py \
+    --input-path /abs/path/to/target.i64 \
+    --request "识别外部可达入口点、分类并评估风险" \
+    --agent-profile attack_surface
+
+# 通用逆向
+PYTHONPATH=src .venv/bin/python reverse_agent.py \
+    --input-path /abs/path/to/target.i64 \
+    --request "自主探索程序功能、攻击面和关键函数" \
+    --agent-profile general_reverse
+```
+
+#### Profile 详细说明
+
+**1. struct_recovery（结构体恢复）**
+- **目标**：恢复二进制中的结构体定义，提升反编译可读性
+- **系统提示词**：`prompts/agent/reverse_expert_system.md`
+- **核心工具**：`create_structure`、`set_identifier_type`、`inspect_variable_accesses`
+- **工作流程**：
+  1. 搜索关键函数（`search`/`xref`）
+  2. 反编译并分析变量访问（`decompile_function`/`inspect_variable_accesses`）
+  3. 创建结构体定义（`create_structure`）
+  4. 应用类型并重反编译验证（`set_identifier_type`）
+  5. 写入函数注释（`set_function_comment`）
+  6. 提交最终输出（`submit_output`）
+- **验收标准**：before/after 结构体 diff、有效 mutation 计数、类型应用验证
+- **适用场景**：需要深度理解数据结构、提升代码可读性、辅助漏洞分析
+
+**2. attack_surface（攻击面分析）**
+- **目标**：识别外部可达入口点，评估攻击面风险
+- **系统提示词**：`prompts/agent/attack_surface_system.md`
+- **核心工具**：`search`、`xref`、`expand_call_path`、`spawn_subagent`
+- **子 Agent**：
+  - `surface_candidate_triage`：候选入口点分诊
+  - `surface_deep_dive`：深度分析入口点上下文
+  - `parameter_control_summary`：外部参数控制分析
+- **工作流程**：
+  1. 粗粒度搜索（网络/文件/IPC/驱动接口）
+  2. 候选分诊（spawn subagent 批量筛选）
+  3. 深度细化（调用链展开、参数追踪）
+  4. 分类评估（风险等级、触发方法）
+  5. 提交攻击面地图（`submit_attack_surface_output`）
+- **完成标准**：至少 5 个入口点（或说明样本限制）、每个入口点包含触发方法与外部参数
+- **适用场景**：安全审计、漏洞挖掘、威胁建模
+
+**3. general_reverse（通用逆向分析）**
+- **目标**：自主探索二进制功能、攻击面、外部交互与关键函数
+- **系统提示词**：`prompts/agent/general_reverse_system.md`
+- **核心工具**：`list_functions`、`search`、`xref`、`expand_call_path`、`spawn_subagent`
+- **子 Agent**：
+  - `function_behavior_summary`：函数行为归纳
+  - `parameter_control_summary`：参数控制分析
+  - `surface_candidate_triage`：攻击面候选筛选
+- **工作流程**：
+  1. 概览阶段（`list_functions`、函数分类）
+  2. 攻击面识别（搜索外部接口）
+  3. 优先级排序（基于调用频率、字符串、导入符号）
+  4. 深度分析（spawn subagent 批量摘要）
+  5. 综合输出（`submit_reverse_analysis_output`）
+- **完成标准**：函数列表摘要、攻击面列表、外部交互文档、不超过 20 个关键函数详细摘要
+- **适用场景**：初次接触未知二进制、快速功能定位、全局威胁评估
+
+#### Profile 架构统一说明
+
+所有 profile 共享同一个 `ReverseRuntimeCore`，差异仅在于：
+- **系统提示词**：不同的分析目标与执行协议
+- **工具过滤**：部分 profile 可能限制某些工具的可见性
+- **finalize 工具**：
+  - `struct_recovery` → `submit_output`
+  - `attack_surface` → `submit_attack_surface_output`
+  - `general_reverse` → `submit_reverse_analysis_output`
+- **子 Agent 配置**：不同 profile 使用不同的子 Agent 提示词组合
+
+### 8.4 仅启动 IDA Service（可选）
 
 ```bash
 cd /mnt/d/reverse/agentic_ida_pro
@@ -193,7 +369,8 @@ bash src/entrypoints/run_ida_service.sh
 - `--request`：任务描述（必填）
 - `--ida-url`：IDA service 地址，默认 `http://127.0.0.1:5000`
 - `--max-iterations`：循环上限，默认 24
-- `--agent-core`：Agent 入口（`struct_recovery` 或 `dispatcher`，默认 `struct_recovery`）
+- `--agent-profile`：主分析 profile（`struct_recovery` / `attack_surface` / `general_reverse`）
+- `--agent-core`：兼容参数，当前统一走通用 runtime
 - `--idapython-kb-dir`：IDAPython 自修复知识库（可选）
 - `--report-dir`：报告目录（默认 `logs/agent_reports`）
 
@@ -233,37 +410,133 @@ bash src/entrypoints/run_ida_service.sh
 
 ---
 
-## 10. Agent 工作流（结构体恢复主线）
+## 10. 子 Agent 系统
+
+### 10.1 子 Agent 概述
+
+主 Agent 可以通过 `spawn_subagent` 工具启动子 Agent 来并行处理批量任务，例如：
+- 批量函数摘要生成
+- 攻击面候选入口点分诊
+- 参数控制流分析
+- 函数行为归纳
+
+子 Agent 特点：
+- **独立上下文**：每个子 Agent 有独立的 LLM 对话上下文，不污染主 Agent
+- **专用提示词**：使用专门的子 Agent 系统提示词（位于 `src/prompts/subagents/`）
+- **工具子集**：子 Agent 只能访问受限的工具集（通常是只读工具）
+- **结果聚合**：子 Agent 完成后，结果返回给主 Agent 进行决策
+
+### 10.2 可用子 Agent 类型
+
+| 子 Agent 类型 | 提示词文件 | 用途 | 主要工具 |
+|--------------|-----------|------|---------|
+| `function_summary_agent` | `function_summary_agent.md` | 通用函数摘要 | `decompile_function`, `xref` |
+| `function_behavior_summary` | `function_behavior_summary.md` | 函数行为归纳 | `decompile_function`, `expand_call_path` |
+| `parameter_control_summary` | `parameter_control_summary.md` | 参数控制分析 | `decompile_function`, `inspect_variable_accesses` |
+| `surface_candidate_triage` | `surface_candidate_triage.md` | 攻击面候选分诊 | `decompile_function`, `xref` |
+| `surface_deep_dive` | `surface_deep_dive.md` | 攻击面深度分析 | `decompile_function`, `expand_call_path` |
+| `idapython_executor` | `idapython_executor.md` | IDAPython 脚本执行 | `run_idapython_task` |
+
+### 10.3 子 Agent 使用示例
+
+```python
+# 主 Agent 调用 spawn_subagent 工具
+spawn_subagent(
+    subagent_type="function_behavior_summary",
+    task_description="分析函数 sub_1234 的行为，关注网络调用和参数传递",
+    context_data={
+        "function_name": "sub_1234",
+        "function_address": "0x1234",
+        "decompiled_code": "...",
+    }
+)
+```
+
+子 Agent 执行流程：
+1. 主 Agent 调用 `spawn_subagent`
+2. `SubAgentManager` 创建子 Agent 实例
+3. 子 Agent 加载专用系统提示词
+4. 子 Agent 执行独立的 tool-call loop（最多 10 轮）
+5. 子 Agent 返回结果给主 Agent
+6. 主 Agent 基于结果继续决策
+
+### 10.4 子 Agent 工具限制
+
+子 Agent 通常只能访问以下只读工具：
+- `search`
+- `xref`
+- `decompile_function`
+- `inspect_variable_accesses`
+- `expand_call_path`
+- `list_functions`
+- `run_idapython_task`（部分子 Agent）
+
+子 Agent **不能**访问：
+- `create_structure`（避免并发修改冲突）
+- `set_identifier_type`（避免并发修改冲突）
+- `set_function_comment`（避免并发修改冲突）
+- `create_task` / `set_task_status`（任务板由主 Agent 管理）
+- `submit_output`（最终提交由主 Agent 控制）
+- `spawn_subagent`（避免递归嵌套）
+
+---
+
+## 11. Agent 工作流（结构体恢复主线）
 
 标准闭环：
 
-1. `search` / `xref` 缩小函数范围  
-2. `decompile_function` 获取伪代码  
-3. `inspect_variable_accesses` 获取变量访问与偏移证据  
-4. `create_structure(..., struct_comment=...)` 创建/更新结构体并写结构体注释  
-5. `set_identifier_type` 应用类型并重反编译  
-6. `set_function_comment` 写函数头分析摘要  
-7. 更新任务状态  
+1. `search` / `xref` 缩小函数范围
+2. `decompile_function` 获取伪代码
+3. `inspect_variable_accesses` 获取变量访问与偏移证据
+4. `create_structure(..., struct_comment=...)` 创建/更新结构体并写结构体注释
+5. `set_identifier_type` 应用类型并重反编译
+6. `set_function_comment` 写函数头分析摘要
+7. 更新任务状态（`create_task` / `set_task_status`）
 8. 重复直到任务板闭环，再 `submit_output`
 
 ---
 
-## 11. 主要工具
+## 12. 主要工具
 
-- 检索：`search`, `xref`
-- 证据采集：`decompile_function`, `inspect_variable_accesses`, `expand_call_path`
-- 建模：`create_structure`
-- 类型应用：`set_identifier_type`
-- 注释沉淀：`set_function_comment`（函数头），`create_structure(..., struct_comment=...)`（结构体）
-- 深度补证：`run_idapython_task`
-- 任务管理：`create_task`, `set_task_status`, `get_task_board`
-- 最终提交：`submit_output`
+### 12.1 检索与导航
+- `search`：搜索符号、字符串、函数名
+- `xref`：查询交叉引用（调用者/被调用者）
+- `list_functions`：列出所有函数（支持过滤）
+
+### 12.2 证据采集
+- `decompile_function`：反编译函数获取伪代码
+- `inspect_variable_accesses`：分析变量访问与偏移
+- `expand_call_path`：展开调用路径（前向/后向）
+
+### 12.3 建模与类型应用
+- `create_structure`：创建/更新结构体定义
+- `set_identifier_type`：应用类型到变量/参数/返回值
+
+### 12.4 注释沉淀
+- `set_function_comment`：写入函数头注释
+- `create_structure(..., struct_comment=...)`：写入结构体注释
+
+### 12.5 任务管理
+- `create_task`：创建新任务
+- `set_task_status`：更新任务状态（todo/in_progress/blocked/done）
+- `get_task_board`：获取当前任务板状态
+
+### 12.6 子 Agent 管理
+- `spawn_subagent`：启动子 Agent 执行批量任务
+
+### 12.7 深度补证
+- `run_idapython_task`：执行自定义 IDAPython 脚本
+
+### 12.8 最终提交
+- `submit_output`：提交结构体恢复结果（struct_recovery profile）
+- `submit_attack_surface_output`：提交攻击面分析结果（attack_surface profile）
+- `submit_reverse_analysis_output`：提交通用逆向分析结果（general_reverse profile）
 
 ---
 
-## 12. 输出产物与日志
+## 13. 输出产物与日志
 
-### 12.1 报告目录
+### 13.1 报告目录
 
 默认输出到：
 
@@ -284,7 +557,7 @@ logs/agent_reports/<session_id>_<timestamp>/
 - `ida_snapshot_before.json`
 - `ida_snapshot_after.json`
 
-### 12.2 会话可观测性数据库
+### 13.2 会话可观测性数据库
 
 ```text
 logs/agent_sessions/agent_observability.sqlite3
@@ -300,7 +573,7 @@ logs/agent_sessions/agent_observability.sqlite3
 
 ---
 
-## 13. 验收机制（reverse_expert）
+## 14. 验收机制（reverse_expert）
 
 脚本会在结束时执行自动验收，典型失败条件：
 
@@ -313,7 +586,7 @@ logs/agent_sessions/agent_observability.sqlite3
 
 ---
 
-## 14. 可观测性 UI（可选）
+## 15. 可观测性 UI（可选）
 
 一键启动前后端：
 
@@ -331,7 +604,7 @@ logs/agent_sessions/agent_observability.sqlite3
 
 ---
 
-## 15. IDA Service API
+## 16. IDA Service API
 
 核心端点：
 
@@ -355,7 +628,7 @@ curl -fsS http://127.0.0.1:5000/db/info
 
 ---
 
-## 16. 示例：结构体恢复任务（基于提供日志）
+## 17. 示例：结构体恢复任务（基于提供日志）
 
 请求：
 
@@ -374,7 +647,7 @@ curl -fsS http://127.0.0.1:5000/db/info
 
 ---
 
-## 17. 常见问题（FAQ）
+## 18. 常见问题（FAQ）
 
 ### Q1: `Unsupported model` 错误
 
@@ -411,38 +684,12 @@ npm run dev -- --host 0.0.0.0 --port 5173
 
 ---
 
-## 18. 开发原则（项目约束）
+## 19. 开发原则（项目约束）
 
 - Agent 以 LLM 为主导，Python 侧保持轻控制逻辑
 - 输入输出以纯文本为主，不依赖 pydantic/json 强结构输出
 - 结构体恢复仅使用 `create_structure` 做落地建模
 - IDAPython 兼容目标固定为 IDA Pro 9.3
-
----
-
-## 19. 复杂逆向样例（suite_v2）
-
-新增复杂数据流样例目录：
-
-```text
-test_binaries/suite_v2
-├── src/              # 6 个 C/C++ 样例源码
-├── bin/              # 编译产物（dbg + strip）
-├── Makefile
-└── README.md
-```
-
-构建（禁优化，保留跨函数逻辑）：
-
-```bash
-cd test_binaries/suite_v2
-make all
-```
-
-每个样例都会产出：
-
-- `*_dbg`（带符号）
-- `*_strip`（strip 后）
 
 ---
 

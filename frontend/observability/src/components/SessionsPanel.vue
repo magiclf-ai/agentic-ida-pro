@@ -402,6 +402,7 @@ const sortedSessions = computed(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  overflow: hidden;
 }
 
 .session-id-text {
@@ -419,6 +420,10 @@ const sortedSessions = computed(() => {
   background: rgba(99, 102, 241, 0.1);
   border-radius: 8px;
   font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sessions-panel.is-dark .binary-name {

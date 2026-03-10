@@ -192,6 +192,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="struct_recovery",
         help="Agent core entrypoint",
     )
+    parser.add_argument(
+        "--agent-profile",
+        choices=["struct_recovery", "attack_surface", "general_reverse"],
+        default="struct_recovery",
+        help="Reverse runtime profile",
+    )
     parser.add_argument("--idapython-kb-dir", default="", help="Optional IDAPython KB dir")
     parser.add_argument("--report-dir", default="", help="Optional report directory")
     return parser
@@ -411,6 +417,7 @@ def _build_reverse_run_namespace(
         ida_url=service_url,
         max_iterations=int(args.max_iterations),
         agent_core=str(args.agent_core),
+        agent_profile=str(args.agent_profile or "struct_recovery"),
         idapython_kb_dir=str(args.idapython_kb_dir or ""),
         report_dir=str(report_dir or DEFAULT_REPORT_DIR),
     )
@@ -548,6 +555,8 @@ def _build_batch_child_cmd(
         str(int(args.max_iterations)),
         "--agent-core",
         str(args.agent_core),
+        "--agent-profile",
+        str(args.agent_profile or "struct_recovery"),
         "--report-dir",
         str(report_dir),
     ]

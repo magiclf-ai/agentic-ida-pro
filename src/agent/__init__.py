@@ -5,6 +5,7 @@ from .observability import ObservabilityHub
 from .policy_manager import PolicyManager
 from .prompt_manager import PromptManager
 from .reverse_agent_core import ReverseAgentCore
+from .reverse_runtime_core import ReverseRuntimeCore, ReverseToolExecutionExtension
 from .struct_recovery_agent import (
     StructRecoveryAgentCore,
     StructRecoveryRuntimeCore,
@@ -26,6 +27,8 @@ __all__ = [
     "PolicyMessageRef",
     "PromptManager",
     "ReverseAgentCore",
+    "ReverseRuntimeCore",
+    "ReverseToolExecutionExtension",
     "StructRecoveryAgentCore",
     "StructRecoveryRuntimeCore",
     "StructRecoveryToolExecutionExtension",

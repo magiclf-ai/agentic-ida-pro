@@ -1,7 +1,7 @@
 """LangChain Tools 定义 - IDA Pro 交互工具集"""
 import re
 from langchain_core.tools import tool
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from pathlib import Path
 from .ida_client import IDAClient
 
@@ -351,8 +351,46 @@ def get_function_info(name: Optional[str] = None, addr: Optional[int] = None) ->
         return f"ERROR: getting function info failed: {str(e)}"
 
 
+def _render_function_list(offset: int = 0, count: int = 100) -> str:
+    client = get_ida_client()
+    try:
+        functions = client.list_functions()
+        row_offset = max(0, int(offset))
+        row_count = max(1, min(int(count), 500))
+        selected = functions[row_offset:row_offset + row_count]
+        output = (
+            f"OK: found {len(functions)} functions\n"
+            f"- offset: {row_offset}\n"
+            f"- count: {row_count}\n"
+            f"- returned_count: {len(selected)}\n"
+        )
+        for func in selected:
+            output += f"  0x{func['ea']:x}: {func['name']} (size: {func['size']})\n"
+        if row_offset + row_count < len(functions):
+            output += f"  ... and {len(functions) - row_offset - len(selected)} more functions\n"
+        return output
+    except Exception as e:
+        return f"ERROR: listing functions failed: {str(e)}"
+
+
 @tool(parse_docstring=True, error_on_invalid_docstring=True)
-def list_all_functions() -> str:
+def list_functions(offset: int = 0, count: int = 100) -> str:
+    """
+    列出数据库中的函数（支持分页）
+
+    Args:
+        offset: 结果偏移（>=0）
+        count: 返回条数（1..500）
+
+    Returns:
+        所有函数的列表，包含 ea, name, size
+
+    """
+    return _render_function_list(offset=offset, count=count)
+
+
+@tool(parse_docstring=True, error_on_invalid_docstring=True)
+def list_all_functions(offset: int = 0, count: int = 100) -> str:
     """
     列出数据库中的所有函数
 
@@ -363,17 +401,7 @@ def list_all_functions() -> str:
         所有函数的列表，包含 ea, name, size
     
     """
-    client = get_ida_client()
-    try:
-        functions = client.list_functions()
-        output = f"OK: found {len(functions)} functions\n"
-        for func in functions[:100]:  # 限制显示数量
-            output += f"  0x{func['ea']:x}: {func['name']} (size: {func['size']})\n"
-        if len(functions) > 100:
-            output += f"  ... and {len(functions) - 100} more functions\n"
-        return output
-    except Exception as e:
-        return f"ERROR: listing functions failed: {str(e)}"
+    return _render_function_list(offset=offset, count=count)
 
 
 @tool(parse_docstring=True, error_on_invalid_docstring=True)
@@ -1400,6 +1428,7 @@ OPTIONAL_TOOLS = [
     list_ida_script_templates,
     run_ida_script_template,
     get_function_info,
+    list_functions,
     list_all_functions,
     get_xrefs_to,
     get_xrefs_from,
@@ -1418,3 +1447,178 @@ tool_map = _build_tool_map(tools)
 
 full_tools = list(CORE_TOOLS) + list(OPTIONAL_TOOLS)
 full_tool_map = _build_tool_map(full_tools)
+
+
+TOOL_PROFILES: Dict[str, List[str]] = {
+    "execute_only": ["execute_idapython"],
+    "struct_recovery": [
+        "execute_idapython",
+        "read_artifact",
+        "decompile_function",
+        "search",
+        "xref",
+        "inspect_variable_accesses",
+        "create_structure",
+        "set_identifier_type",
+        "set_function_comment",
+        "expand_call_path",
+        "get_function_info",
+        "list_functions",
+        "list_all_functions",
+    ],
+    "attack_surface": [
+        "execute_idapython",
+        "decompile_function",
+        "search",
+        "xref",
+        "inspect_variable_accesses",
+        "expand_call_path",
+        "get_function_info",
+        "list_functions",
+        "list_all_functions",
+        "read_artifact",
+    ],
+    "general_reverse": [
+        "execute_idapython",
+        "decompile_function",
+        "search",
+        "xref",
+        "inspect_variable_accesses",
+        "expand_call_path",
+        "get_function_info",
+        "list_functions",
+        "list_all_functions",
+        "get_database_info",
+        "read_artifact",
+    ],
+    "full": [tool_obj.name for tool_obj in full_tools],
+}
+
+
+PROFILE_ALIASES: Dict[str, str] = {
+    "": "execute_only",
+    "minimal_codeact": "execute_only",
+    "codeact": "execute_only",
+    "execute_only": "execute_only",
+    "struct_recovery": "struct_recovery",
+    "attack_surface": "attack_surface",
+    "general_reverse": "general_reverse",
+    "full": "full",
+    "full_tools": "full",
+}
+
+
+FINALIZE_TOOL_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "struct_recovery": {
+        "tool_name": "submit_output",
+        "title": "# Reverse Agent Final Summary",
+        "sections": [
+            ("Summary", "summary"),
+            ("Key Findings", "key_findings"),
+            ("Artifacts", "artifacts"),
+            ("Next Steps", "next_steps"),
+        ],
+        "incomplete_reason": "max_iterations_reached_without_submit_output",
+    },
+    "attack_surface": {
+        "tool_name": "submit_attack_surface_output",
+        "title": "# Attack Surface Analysis Final",
+        "sections": [
+            ("Summary", "summary"),
+            ("Entry Points", "entry_points"),
+            ("Interface Classification", "interface_classification"),
+            ("Risk Assessment", "risk_assessment"),
+        ],
+        "incomplete_reason": "max_iterations_reached_without_submit_attack_surface_output",
+    },
+    "general_reverse": {
+        "tool_name": "submit_reverse_analysis_output",
+        "title": "# General Reverse Analysis Final",
+        "sections": [
+            ("Summary", "summary"),
+            ("Function List", "function_list"),
+            ("Attack Surfaces", "attack_surfaces"),
+            ("External Interactions", "external_interactions"),
+            ("External Parameters", "external_parameters"),
+            ("Key Functions", "key_functions"),
+        ],
+        "incomplete_reason": "max_iterations_reached_without_submit_reverse_analysis_output",
+    },
+}
+
+
+MUTATING_TOOLS: Dict[str, Set[str]] = {
+    "execute_only": set(),
+    "struct_recovery": {
+        "create_structure",
+        "set_identifier_type",
+        "set_function_comment",
+    },
+    "attack_surface": set(),
+    "general_reverse": set(),
+    "full": {
+        "create_structure",
+        "set_identifier_type",
+        "set_function_comment",
+    },
+}
+
+
+def normalize_tool_profile(profile: str) -> str:
+    key = str(profile or "").strip().lower()
+    return PROFILE_ALIASES.get(key, key or "execute_only")
+
+
+def get_tools_for_profile(profile: str, available_tools: Optional[List[Any]] = None) -> List[Any]:
+    selected_profile = normalize_tool_profile(profile)
+    tool_names = TOOL_PROFILES.get(selected_profile)
+    if not tool_names:
+        raise ValueError(
+            f"Unknown tool profile '{profile}'. Supported values: {sorted(TOOL_PROFILES.keys())}"
+        )
+
+    pool = list(available_tools) if available_tools is not None else list(full_tools)
+    available_map = _build_tool_map(pool)
+    selected_tools: List[Any] = []
+    seen = set()
+    for tool_name in tool_names:
+        tool_obj = available_map.get(tool_name)
+        if tool_obj is None or tool_name in seen:
+            continue
+        selected_tools.append(tool_obj)
+        seen.add(tool_name)
+    return selected_tools
+
+
+def get_mutating_tools_for_profile(profile: str) -> Set[str]:
+    selected_profile = normalize_tool_profile(profile)
+    return set(MUTATING_TOOLS.get(selected_profile, set()))
+
+
+def get_finalize_config_for_profile(profile: str) -> Dict[str, Any]:
+    selected_profile = normalize_tool_profile(profile)
+    if selected_profile not in FINALIZE_TOOL_CONFIGS:
+        raise ValueError(
+            f"Unknown finalize profile '{profile}'. Supported values: {sorted(FINALIZE_TOOL_CONFIGS.keys())}"
+        )
+    return dict(FINALIZE_TOOL_CONFIGS[selected_profile])
+
+
+__all__ = [
+    "CORE_TOOLS",
+    "OPTIONAL_TOOLS",
+    "TOOL_PROFILES",
+    "PROFILE_ALIASES",
+    "FINALIZE_TOOL_CONFIGS",
+    "MUTATING_TOOLS",
+    "full_tool_map",
+    "full_tools",
+    "get_finalize_config_for_profile",
+    "get_ida_client",
+    "get_mutating_tools_for_profile",
+    "get_tools_for_profile",
+    "normalize_tool_profile",
+    "set_ida_client",
+    "tool_map",
+    "tools",
+]

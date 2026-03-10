@@ -17,10 +17,9 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from agent.reverse_agent_core import ReverseAgentCore
-from agent.struct_recovery_agent import StructRecoveryAgentCore
 
 
-REQUIRED_MODEL = "gpt-5.2"
+DEFAULT_MODEL = "gpt-5.2"
 DEFAULT_REPORT_DIR = os.path.join(project_root, "..", "logs", "agent_reports")
 
 
@@ -370,6 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Agent core entrypoint: direct struct_recovery or reverse dispatcher",
     )
     parser.add_argument(
+        "--agent-profile",
+        choices=["struct_recovery", "attack_surface", "general_reverse"],
+        default="struct_recovery",
+        help="Agent profile executed by the generic reverse runtime",
+    )
+    parser.add_argument(
         "--idapython-kb-dir",
         default="",
         help="Optional IDAPython knowledge base directory for run_idapython_task agent search_kb/read_file",
@@ -384,10 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def run_from_namespace(args: argparse.Namespace) -> int:
 
-    model = str(os.getenv("OPENAI_MODEL", REQUIRED_MODEL)).strip()
-    if model != REQUIRED_MODEL:
-        print(f"[ERROR] Unsupported model '{model}'. Only '{REQUIRED_MODEL}' is allowed.")
-        return 1
+    model = str(os.getenv("OPENAI_MODEL", DEFAULT_MODEL)).strip()
+    if not model:
+        model = DEFAULT_MODEL
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -403,24 +407,15 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
         print("[ERROR] max-iterations must be > 0")
         return 2
 
-    if str(args.agent_core) == "dispatcher":
-        agent = ReverseAgentCore(
-            ida_service_url=args.ida_url,
-            openai_api_key=api_key,
-            openai_base_url=base_url,
-            model=model,
-            idapython_kb_dir=args.idapython_kb_dir,
-            tool_profile="struct_recovery",
-            agent_core="struct_recovery",
-        )
-    else:
-        agent = StructRecoveryAgentCore(
-            ida_service_url=args.ida_url,
-            openai_api_key=api_key,
-            openai_base_url=base_url,
-            model=model,
-            idapython_kb_dir=args.idapython_kb_dir,
-        )
+    agent = ReverseAgentCore(
+        ida_service_url=args.ida_url,
+        openai_api_key=api_key,
+        openai_base_url=base_url,
+        model=model,
+        idapython_kb_dir=args.idapython_kb_dir,
+        agent_profile=str(args.agent_profile or "struct_recovery"),
+        runtime_name=f"ReverseAgentCore[{str(args.agent_profile or 'struct_recovery')}]",
+    )
 
     try:
         health = await asyncio.to_thread(agent.ida_client.health_check)
@@ -430,7 +425,8 @@ async def run_from_namespace(args: argparse.Namespace) -> int:
 
     print(f"[INFO] Request: {request_text}")
     print(f"[INFO] Agent core: {args.agent_core}")
-    print("[INFO] Tool profile: struct_recovery")
+    print(f"[INFO] Agent profile: {args.agent_profile}")
+    print(f"[INFO] Tool profile: {args.agent_profile}")
     print("[INFO] Loop mode: single_policy_loop")
 
     backup_info: Dict[str, Any] = {}
