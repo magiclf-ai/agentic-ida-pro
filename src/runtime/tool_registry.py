@@ -5,7 +5,7 @@ from typing import Any, List
 
 from langchain_core.tools import BaseTool
 
-from .tools import get_tools_for_profile, normalize_tool_profile
+from core.tools import get_tools_for_profile, normalize_tool_profile
 
 
 class ExpertToolRegistry:

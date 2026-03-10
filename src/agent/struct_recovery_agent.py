@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from .reverse_runtime_core import ReverseRuntimeCore, ReverseToolExecutionExtension
+from runtime import ReverseRuntimeCore, ReverseToolExecutionExtension
 
 
 class StructRecoveryToolExecutionExtension(ReverseToolExecutionExtension):

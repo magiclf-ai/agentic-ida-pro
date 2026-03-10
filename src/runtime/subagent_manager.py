@@ -4,10 +4,10 @@ from __future__ import annotations
 import time
 from typing import Dict, List, Optional, TYPE_CHECKING
 
-from .models import SubAgentState
+from core.models import SubAgentState
 
 if TYPE_CHECKING:
-    from .observability import ObservabilityHub
+    from core.observability import ObservabilityHub
 
 
 class SubAgentManager:

@@ -8,11 +8,11 @@ from typing import Any, Dict, List, TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from .models import SubAgentState
-from .utils import AgentUtils
+from core.models import SubAgentState
+from core.utils import AgentUtils
 
 if TYPE_CHECKING:
-    from .struct_recovery_agent import StructRecoveryRuntimeCore
+    from agent.struct_recovery_agent import StructRecoveryRuntimeCore
 
 
 class SubAgentRuntime:

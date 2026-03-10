@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from .models import PolicyMessageRef
+from core.models import PolicyMessageRef
 
 
 class PolicyManager:

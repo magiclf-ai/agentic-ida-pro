@@ -9,11 +9,11 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from langchain_core.tools import BaseTool, tool
 
-from .idapython_kb import read_file_with_lineno, resolve_kb_root
-from .utils import AgentUtils
+from core.idapython_kb import read_file_with_lineno, resolve_kb_root
+from core.utils import AgentUtils
 
 if TYPE_CHECKING:
-    from .struct_recovery_agent import StructRecoveryRuntimeCore
+    from agent.struct_recovery_agent import StructRecoveryRuntimeCore
 
 
 class IDAPythonTaskAgent:

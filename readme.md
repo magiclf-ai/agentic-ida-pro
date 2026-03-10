@@ -94,13 +94,14 @@ IDB / Hex-Rays / IDA APIs
 
 ### 3.2 核心组件说明
 
-- **ReverseAgentCore**：Profile 分发器，根据 `--agent-profile` 参数路由到对应的系统提示词
-- **ReverseRuntimeCore**：统一的 LLM 驱动运行时，所有 profile 共享同一个 tool-call loop
-- **StructRecoveryAgentCore**：结构体恢复特化版本（向后兼容，内部使用 ReverseRuntimeCore）
-- **PolicyManager**：管理 LLM 对话历史、上下文压缩、工具调用循环
-- **TaskBoard**：任务板管理（todo/in_progress/blocked/done）
-- **SubAgentManager**：管理子 Agent 生命周期（函数摘要、参数分析、攻击面分诊等）
-- **ExpertToolRegistry**：工具注册表，支持 profile 级别的工具过滤
+- **ReverseAgentCore**：Profile 分发器，根据 `--agent-profile` 参数路由到对应的系统提示词（位于 `agent/`）
+- **ReverseRuntimeCore**：统一的 LLM 驱动运行时，所有 profile 共享同一个 tool-call loop（位于 `runtime/`）
+- **StructRecoveryAgentCore**：结构体恢复特化版本（向后兼容，内部使用 ReverseRuntimeCore）（位于 `agent/`）
+- **PolicyManager**：管理 LLM 对话历史、上下文压缩、工具调用循环（位于 `runtime/`）
+- **TaskBoard**：任务板管理（todo/in_progress/blocked/done）（位于 `core/`）
+- **SubAgentManager**：管理子 Agent 生命周期（函数摘要、参数分析、攻击面分诊等）（位于 `runtime/`）
+- **ExpertToolRegistry**：工具注册表，支持 profile 级别的工具过滤（位于 `runtime/`）
+- **IDAClient**：IDA Pro HTTP 客户端，负责与 IDA Service 通信（位于 `clients/`）
 
 ---
 
@@ -109,21 +110,29 @@ IDB / Hex-Rays / IDA APIs
 ```text
 .
 ├── src/
-│   ├── agent/                     # Agent 核心模块
+│   ├── agent/                     # Agent 实现（仅包含具体 Agent 类）
 │   │   ├── reverse_agent_core.py      # Profile 分发器
-│   │   ├── reverse_runtime_core.py    # 统一运行时核心
 │   │   ├── struct_recovery_agent.py   # 结构体恢复特化版本
+│   │   └── idapython_agent.py         # IDAPython 任务 Agent
+│   ├── runtime/                   # 运行时核心与管理器
+│   │   ├── reverse_runtime_core.py    # 统一运行时核心
+│   │   ├── subagent_runtime.py        # 子 Agent 运行时
 │   │   ├── policy_manager.py          # LLM 策略管理
-│   │   ├── task_board.py              # 任务板管理
+│   │   ├── prompt_manager.py          # Prompt 模板管理
 │   │   ├── knowledge_manager.py       # 知识库管理
-│   │   ├── subagent_manager.py        # 子 Agent 管理
-│   │   ├── context_distiller.py       # 上下文压缩
-│   │   ├── observability.py           # 可观测性 Hub
+│   │   ├── subagent_manager.py        # 子 Agent 生命周期管理
 │   │   ├── tool_registry.py           # 工具注册表
+│   │   └── context_distiller.py       # 上下文压缩
+│   ├── core/                      # 核心工具、模型和基础设施
+│   │   ├── models.py                  # 数据模型定义
 │   │   ├── tools.py                   # 工具定义与实现
-│   │   ├── ida_client.py              # IDA HTTP 客户端
-│   │   ├── idapython_agent.py         # IDAPython 任务 Agent
-│   │   └── ...                        # 其他辅助模块
+│   │   ├── utils.py                   # 通用工具函数
+│   │   ├── task_board.py              # 任务板管理
+│   │   ├── session_logger.py          # 会话日志记录
+│   │   ├── observability.py           # 可观测性 Hub
+│   │   └── idapython_kb.py            # IDAPython 知识库
+│   ├── clients/                   # 外部服务客户端
+│   │   └── ida_client.py              # IDA HTTP 客户端
 │   ├── prompts/                   # 系统提示词与子 Agent 提示词
 │   │   ├── agent/                     # 主 Agent 系统提示词
 │   │   │   ├── reverse_expert_system.md       # 结构体恢复系统提示词
@@ -155,10 +164,11 @@ IDB / Hex-Rays / IDA APIs
 │   │   ├── reverse_expert.py          # 主分析流程
 │   │   ├── logs.py                    # 日志服务
 │   │   └── observability_api.py       # 可观测性 API
-│   └── skills/                    # 技能定义
-│       ├── struct_recovery/           # 结构体恢复技能
-│       ├── function_analysis/         # 函数分析技能
-│       └── string_decrypt/            # 字符串解密技能
+│   ├── skills/                    # 技能定义
+│   │   ├── struct_recovery/           # 结构体恢复技能
+│   │   ├── function_analysis/         # 函数分析技能
+│   │   └── string_decrypt/            # 字符串解密技能
+│   └── STRUCTURE.md               # 详细的源码结构说明文档
 ├── frontend/observability/        # 可观测性前端 (Vue)
 │   ├── src/
 │   │   ├── components/                # Vue 组件
@@ -169,6 +179,15 @@ IDB / Hex-Rays / IDA APIs
 │   └── agent_sessions/                # 会话可观测性数据库
 └── reverse_agent.py               # 根目录统一入口
 ```
+
+### 模块职责说明
+
+- **agent/** - 仅包含具体的 Agent 实现类，保持简洁
+- **runtime/** - 运行时核心、各种管理器和上下文处理
+- **core/** - 数据模型、工具定义、通用工具和基础设施
+- **clients/** - 与外部服务交互的客户端（IDA、未来可能的其他服务）
+
+详细的模块导入规范和设计原则请参考 `src/STRUCTURE.md`。
 
 ---
 

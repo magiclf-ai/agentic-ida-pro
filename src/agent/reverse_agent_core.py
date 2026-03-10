@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .reverse_runtime_core import ReverseRuntimeCore
-from .tools import get_finalize_config_for_profile, normalize_tool_profile
+from runtime import ReverseRuntimeCore
+from core.tools import get_finalize_config_for_profile, normalize_tool_profile
 
 
 class ReverseAgentCore:

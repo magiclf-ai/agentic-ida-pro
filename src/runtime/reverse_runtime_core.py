@@ -13,18 +13,19 @@ from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
 
 from .context_distiller import ContextDistillerAgent
-from .ida_client import IDAClient
-from .idapython_agent import IDAPythonTaskAgent
 from .knowledge_manager import KnowledgeManager
-from .models import PolicyMessageRef
-from .observability import ObservabilityHub
 from .policy_manager import PolicyManager
 from .prompt_manager import PromptManager
-from .session_logger import AgentSessionLogger
 from .subagent_runtime import SubAgentRuntime
 from .subagent_manager import SubAgentManager
-from .task_board import TaskBoard
-from .tools import (
+from .tool_registry import ExpertToolRegistry
+
+from clients import IDAClient
+from core.models import PolicyMessageRef
+from core.observability import ObservabilityHub
+from core.session_logger import AgentSessionLogger
+from core.task_board import TaskBoard
+from core.tools import (
     full_tools as all_registered_tools,
     get_finalize_config_for_profile,
     get_mutating_tools_for_profile,
@@ -32,8 +33,7 @@ from .tools import (
     set_ida_client,
     tools as registered_tools,
 )
-from .tool_registry import ExpertToolRegistry
-from .utils import AgentUtils
+from core.utils import AgentUtils
 
 
 class MutationTrackingToolExecutionExtension:
@@ -212,6 +212,10 @@ class BaseReverseRuntimeCore:
         self._finalize_payload: Dict[str, str] = {}
 
         self.subagent_runtime = SubAgentRuntime(self)
+        # Delay package import until runtime construction is complete to avoid
+        # agent -> runtime -> agent package initialization cycles.
+        from agent.idapython_agent import IDAPythonTaskAgent
+
         self.idapython_agent = IDAPythonTaskAgent(self)
         self.expert_tools = self._build_expert_tools(self.tool_profile)
         self.expert_tool_map = {row.name: row for row in self.expert_tools}

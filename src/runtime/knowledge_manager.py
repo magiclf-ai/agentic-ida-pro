@@ -1,7 +1,7 @@
 """Working knowledge manager for the agent."""
 from typing import List
 
-from .models import WorkingKnowledge
+from core.models import WorkingKnowledge
 
 
 class KnowledgeManager:

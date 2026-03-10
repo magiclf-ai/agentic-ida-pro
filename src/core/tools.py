@@ -3,7 +3,7 @@ import re
 from langchain_core.tools import tool
 from typing import Dict, Any, Optional, List, Set
 from pathlib import Path
-from .ida_client import IDAClient
+from clients import IDAClient
 
 
 # 全局 IDA 客户端实例
