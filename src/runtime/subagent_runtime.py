@@ -282,6 +282,12 @@ class SubAgentRuntime:
         )
         for iteration in range(1, max_iters + 1):
             turn_id = f"{agent_id}:{iteration}:subpolicy:{uuid.uuid4().hex[:8]}"
+            self.core._emit_turn_started(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+            )
             subagent_updates = self.core.subagent_mgr.drain_completed_updates(parent_agent_id=agent_id)
             if subagent_updates:
                 self.core.policy_mgr.append_message(
@@ -325,12 +331,50 @@ class SubAgentRuntime:
                 {
                     "turn_id": turn_id,
                     "agent_id": agent_id,
+                    "agent_name": self.core.runtime_name,
+                    "parent_agent_id": parent_agent_id,
+                    "iteration": iteration,
+                    "phase": "subagent",
                     "tools": [{"name": t.name, "description": getattr(t, "description", "")} for t in all_tools],
                 },
             )
 
             interaction_started = time.perf_counter()
-            response = await self.core._ainvoke_with_retry(llm_with_tools, messages, max_retries=self.core.llm_max_retries)
+            self.core._emit_llm_request_sent(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                messages=messages,
+            )
+            try:
+                response = await self.core._ainvoke_with_retry(llm_with_tools, messages, max_retries=self.core.llm_max_retries)
+            except Exception as e:
+                self.core.obs.emit(
+                    "llm_response_failed",
+                    {
+                        "turn_id": turn_id,
+                        "agent_id": agent_id,
+                        "agent_name": self.core.runtime_name,
+                        "parent_agent_id": parent_agent_id,
+                        "iteration": iteration,
+                        "phase": "subagent",
+                        "error": str(e),
+                        "messages": self.core._serialize_messages_for_log(messages),
+                    },
+                )
+                self.core._emit_turn_completed(
+                    turn_id=turn_id,
+                    agent_id=agent_id,
+                    parent_agent_id=parent_agent_id,
+                    iteration=iteration,
+                    status="failed",
+                    latency_s=time.perf_counter() - interaction_started,
+                    usage={},
+                    tool_calls=[],
+                    error=str(e),
+                )
+                raise
             response_content = getattr(response, "content", "") or ""
             response_text = AgentUtils.content_to_text(response_content)
             tool_calls = self.core._normalize_tool_calls(getattr(response, "tool_calls", None), turn_id=turn_id)
@@ -372,6 +416,16 @@ class SubAgentRuntime:
                 usage["input_tokens"] = usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens")
                 usage["output_tokens"] = usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens")
 
+            self.core._emit_llm_response_received(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                response_text=response_text,
+                tool_calls=tool_calls,
+                latency_s=latency_s,
+                usage=usage,
+            )
             self.core.obs.emit(
                 "llm_interaction",
                 {
@@ -384,6 +438,16 @@ class SubAgentRuntime:
                     "latency_s": round(latency_s, 4),
                     "usage": usage if usage.get("input_tokens") or usage.get("output_tokens") else None,
                 },
+            )
+            self.core._emit_turn_completed(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                status="completed",
+                latency_s=latency_s,
+                usage=usage,
+                tool_calls=tool_calls,
             )
             if self.core._finalized:
                 return {
