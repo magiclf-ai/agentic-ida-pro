@@ -143,7 +143,7 @@ class BaseReverseRuntimeCore:
 
         self.tool_result_log_chars = 4000
         self.message_log_chars = 12000
-        self.llm_max_retries = 1
+        self.llm_max_retries = 3
         self.subagent_max_retries = 0
         self.tool_call_max_parallel = 4
         self.tool_call_collect_all_errors = True
@@ -189,6 +189,8 @@ class BaseReverseRuntimeCore:
         self.enable_llm_console_log = self._llm_console_logging_enabled()
         self.last_session_id: Optional[str] = None
         self.session_db_path: Optional[str] = None
+        self.watch_run_id = str(os.getenv("AGENT_WATCH_RUN_ID", "")).strip()
+        self.watch_log_path = str(os.getenv("AGENT_SESSION_LOG_PATH", "")).strip()
 
         self.policy_id = "llm_driven_v1"
         self.loop_mode = "single_policy_loop"
@@ -281,6 +283,11 @@ class BaseReverseRuntimeCore:
         self.session_logger = AgentSessionLogger(self.session_log_dir)
         self.last_session_id = self.session_logger.session_id
         self.session_db_path = self.session_logger.db_path
+        if self.watch_log_path:
+            try:
+                self.session_logger.set_log_path(self.watch_log_path)
+            except Exception:
+                pass
         self.obs = ObservabilityHub(self.session_logger, debug_enabled=self._debug_enabled())
 
 
@@ -655,8 +662,13 @@ class BaseReverseRuntimeCore:
     @staticmethod
     def _is_retryable_llm_error(error_text: str) -> bool:
         text = str(error_text).lower()
+        if any(code in text for code in ("500", "502", "503", "504")):
+            return True
         return (
             "429" in text
+            or "bad gateway" in text
+            or "gateway timeout" in text
+            or "internal server error" in text
             or "rate limit" in text
             or "temporarily unavailable" in text
             or "service unavailable" in text
@@ -757,6 +769,212 @@ class BaseReverseRuntimeCore:
                 row["is_error"] = content_text.startswith("ERROR:") or content_text.startswith("Error:") or content_text.startswith("[ERROR]")
             rows.append(row)
         return rows
+
+    def _base_event_payload(
+        self,
+        *,
+        agent_id: str = "",
+        turn_id: str = "",
+        parent_agent_id: str = "",
+        iteration: int = 0,
+        phase: str = "",
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "agent_name": self.runtime_name,
+            "policy_id": self.policy_id,
+            "git_commit": self.git_commit,
+            "loop_mode": self.loop_mode,
+        }
+        if agent_id:
+            payload["agent_id"] = str(agent_id)
+        if turn_id:
+            payload["turn_id"] = str(turn_id)
+        if parent_agent_id:
+            payload["parent_agent_id"] = str(parent_agent_id)
+        if int(iteration or 0) > 0:
+            payload["iteration"] = int(iteration)
+        if phase:
+            payload["phase"] = str(phase)
+        payload.update(extra)
+        return payload
+
+    def _phase_for_agent(self, agent_id: str) -> str:
+        return "main" if str(agent_id or "") == "main" else "subagent"
+
+    def _emit_turn_started(
+        self,
+        *,
+        turn_id: str,
+        agent_id: str,
+        parent_agent_id: str,
+        iteration: int,
+        status: str = "running",
+    ) -> None:
+        self.obs.emit(
+            "turn_started",
+            self._base_event_payload(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                phase=self._phase_for_agent(agent_id),
+                status=str(status or "running"),
+            ),
+        )
+
+    def _emit_llm_request_sent(
+        self,
+        *,
+        turn_id: str,
+        agent_id: str,
+        parent_agent_id: str,
+        iteration: int,
+        messages: List[Any],
+    ) -> None:
+        self.obs.emit(
+            "llm_request_sent",
+            self._base_event_payload(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                phase=self._phase_for_agent(agent_id),
+                message_count=len(messages),
+                tool_profile=self.tool_profile,
+            ),
+        )
+
+    def _emit_llm_response_received(
+        self,
+        *,
+        turn_id: str,
+        agent_id: str,
+        parent_agent_id: str,
+        iteration: int,
+        response_text: str,
+        tool_calls: List[Dict[str, Any]],
+        latency_s: float,
+        usage: Dict[str, Any],
+        messages: Optional[List[Any]] = None,
+    ) -> None:
+        payload = self._base_event_payload(
+            turn_id=turn_id,
+            agent_id=agent_id,
+            parent_agent_id=parent_agent_id,
+            iteration=iteration,
+            phase=self._phase_for_agent(agent_id),
+            latency_s=round(float(latency_s or 0), 4),
+            tool_call_count=len(tool_calls),
+            tool_names=[str(row.get("name", "") or "") for row in tool_calls],
+            response_preview=AgentUtils.truncate(" ".join(str(response_text or "").split()), 320),
+        )
+        if usage:
+            payload["usage"] = usage
+        if messages is not None:
+            payload["messages"] = messages
+        self.obs.emit("llm_response_received", payload)
+
+    def _emit_turn_completed(
+        self,
+        *,
+        turn_id: str,
+        agent_id: str,
+        parent_agent_id: str,
+        iteration: int,
+        status: str,
+        latency_s: float,
+        usage: Dict[str, Any],
+        tool_calls: List[Dict[str, Any]],
+        error: str = "",
+    ) -> None:
+        input_tokens = None
+        output_tokens = None
+        if isinstance(usage, dict):
+            input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+            output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        self.obs.emit(
+            "turn_completed",
+            self._base_event_payload(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                phase=self._phase_for_agent(agent_id),
+                status=str(status or "completed"),
+                latency_s=round(float(latency_s or 0), 4),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                tool_call_count=len(tool_calls),
+                error=str(error or ""),
+            ),
+        )
+        self.obs.emit(
+            "session_heartbeat",
+            self._base_event_payload(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                phase=self._phase_for_agent(agent_id),
+                status=str(status or "completed"),
+                last_progress_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                tool_call_count=len(tool_calls),
+            ),
+        )
+
+    def _emit_tool_batch_and_mutations(
+        self,
+        *,
+        turn_id: str,
+        agent_id: str,
+        parent_agent_id: str,
+        iteration: int,
+        outputs: List[Dict[str, Any]],
+        elapsed_ms: int,
+        parallel_limit: int,
+        finalize_count: int,
+    ) -> None:
+        self.obs.emit(
+            "tool_batch_executed",
+            self._base_event_payload(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                phase=self._phase_for_agent(agent_id),
+                batch_size=len(outputs),
+                parallel_limit=parallel_limit,
+                finalize_count=finalize_count,
+                success_count=len([row for row in outputs if not bool(row.get("is_error", False))]),
+                error_count=len([row for row in outputs if bool(row.get("is_error", False))]),
+                elapsed_ms=int(elapsed_ms),
+                durations_ms=[int(row.get("duration_ms", 0)) for row in outputs],
+                tool_calls=[self._build_tool_observability_row(row) for row in outputs],
+            ),
+        )
+
+        mutating_tools = set(get_mutating_tools_for_profile(self.tool_profile))
+        for row in outputs:
+            tool_name = str(row.get("tool_name", "") or "")
+            if tool_name not in mutating_tools and row.get("mutation_effective") is None:
+                continue
+            self.obs.emit(
+                "idb_mutation_action",
+                self._base_event_payload(
+                    turn_id=turn_id,
+                    agent_id=agent_id,
+                    parent_agent_id=parent_agent_id,
+                    iteration=iteration,
+                    phase=self._phase_for_agent(agent_id),
+                    tool_name=tool_name,
+                    tool_call_id=str(row.get("tool_call_id", "") or ""),
+                    is_error=bool(row.get("is_error", False)),
+                    mutation_effective=row.get("mutation_effective"),
+                    duration_ms=int(row.get("duration_ms", 0) or 0),
+                    result_preview=AgentUtils.truncate(str(row.get("result", "") or ""), 400),
+                ),
+            )
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
@@ -1397,6 +1615,130 @@ class BaseReverseRuntimeCore:
     def _build_main_system_prompt(self) -> str:
         return self.prompt_manager.render("agent/reverse_expert_system.md", {})
 
+    def _build_iteration_budget_prompt(self, *, iteration: int, max_iterations: int) -> str:
+        max_iters = int(max_iterations or 0)
+        if max_iters <= 0:
+            return ""
+
+        current = max(1, int(iteration or 1))
+        remaining = max(0, max_iters - current + 1)
+        finalize_tool = str(getattr(self, "finalize_tool_name", "") or "submit_output").strip() or "submit_output"
+
+        lines = [
+            "## Iteration Budget",
+            f"- iteration: {current}/{max_iters}",
+            f"- remaining_turns_including_this_turn: {remaining}",
+        ]
+
+        if max_iters <= 3:
+            lines.extend(
+                [
+                    "- mode: short_budget",
+                    "- rule: 预算极低，只允许最小必要取证；不要扩张搜索面，不要把预算耗在细碎任务管理上。",
+                    "- rule: 若上下文中已经给出明确函数名、case spec、成功标准或关注点，首轮直接对这些函数做 `decompile_function` / `inspect_variable_accesses`；只有入口完全未知时才做宽泛 `search`。",
+                    "- rule: short_budget 下禁止把首轮预算浪费在 `create_task`、宽泛字符串搜索或与当前关键函数无关的任务上。",
+                    "- hard_rule: 若本轮调用 `create_task` / `set_task_status` / `edit_task`，同轮必须继续调用至少一个直接产出证据或落地改动的工具；禁止仅做任务管理后结束本轮。",
+                ]
+            )
+            if remaining == 1:
+                lines.append(f"- hard_rule: 这是最后一轮，必须输出当前最佳结论，并在本轮最后调用 `{finalize_tool}`。")
+            else:
+                lines.append(f"- rule: 若本轮已拿到关键证据，可直接调用 `{finalize_tool}`，不要机械等待下一轮。")
+            return "\n".join(lines)
+
+        if remaining <= 2:
+            lines.extend(
+                [
+                    "- mode: finalize_window",
+                    "- rule: 收缩未闭环任务，只保留最终提交所需的关键证据。",
+                    "- rule: 若已经拿到可建模的偏移/类型证据，剩余轮次必须优先完成 `create_structure` -> `set_identifier_type` -> 重反编译验证；禁止再为次要命名、额外字符串或外围搜索耗尽预算。",
+                    "- hard_rule: 若上一轮或当前上下文已经出现 `create_structure` 成功结果，下一轮必须优先执行 `set_identifier_type` 与重反编译验证；除非上一轮明确报错，否则禁止重复对同名结构体再次 `create_structure`。",
+                ]
+            )
+            if remaining == 1:
+                lines.append(f"- hard_rule: 这是最后一轮，禁止新增任务；必须调用 `{finalize_tool}`。")
+            else:
+                lines.append(f"- rule: 下一轮将是最后一轮，若证据足够，本轮优先准备并调用 `{finalize_tool}`。")
+            return "\n".join(lines)
+
+        return ""
+
+    async def _attempt_forced_finalize(
+        self,
+        *,
+        messages: List[Any],
+        turn_id: str,
+        agent_id: str,
+        parent_agent_id: str,
+        iteration: int,
+        max_iterations: int,
+        tool_map: Dict[str, BaseTool],
+    ) -> bool:
+        if self._finalized:
+            return True
+
+        finalize_tool_name = str(getattr(self, "finalize_tool_name", "") or "submit_output").strip() or "submit_output"
+        finalize_tool = tool_map.get(finalize_tool_name)
+        if finalize_tool is None:
+            return False
+
+        force_turn_id = f"{turn_id}:forced_finalize"
+        reminder = "\n".join(
+            [
+                "## Forced Finalize",
+                f"- iteration: {int(iteration)}/{int(max_iterations)}",
+                f"- requirement: 这是最后一次收尾机会。禁止继续搜索、创建任务或展开新分析。",
+                f"- action: 只能基于当前已有证据调用 `{finalize_tool_name}`，输出当前最佳结论。",
+                "- note: 如果证据不足，必须在最终提交中明确写出限制与未覆盖项。",
+            ]
+        )
+        self.policy_mgr.append_message(
+            messages=messages,
+            message_obj=HumanMessage(content=reminder),
+            role="user",
+            turn_id=force_turn_id,
+            protected=False,
+        )
+
+        forced_llm = self.llm.bind_tools([finalize_tool], tool_choice=finalize_tool_name)
+        try:
+            response = await self._ainvoke_with_retry(forced_llm, messages, max_retries=1)
+        except Exception:
+            return False
+
+        response_text = AgentUtils.content_to_text(getattr(response, "content", "") or "")
+        tool_calls = self._normalize_tool_calls(getattr(response, "tool_calls", None), turn_id=force_turn_id)
+        self.policy_mgr.append_message(
+            messages=messages,
+            message_obj=AIMessage(content=response_text, tool_calls=tool_calls),
+            role="assistant",
+            turn_id=force_turn_id,
+            protected=False,
+        )
+        if not tool_calls:
+            return False
+
+        outputs = await self._execute_tool_calls(
+            turn_id=force_turn_id,
+            agent_id=agent_id,
+            parent_agent_id=parent_agent_id,
+            iteration=iteration,
+            tool_calls=tool_calls,
+            tool_map={finalize_tool_name: finalize_tool},
+        )
+        for idx, row in enumerate(outputs, start=1):
+            tool_call_id = str(row.get("tool_call_id", "") or tool_calls[idx - 1].get("id", "") or f"{force_turn_id}:tool:{idx}")
+            result_text = str(row.get("result", "") or "")
+            tool_name = str(row.get("tool_name", "") or tool_calls[idx - 1].get("name", "") or "")
+            self.policy_mgr.append_message(
+                messages=messages,
+                message_obj=ToolMessage(content=result_text, tool_call_id=tool_call_id, name=tool_name),
+                role="tool",
+                turn_id=force_turn_id,
+                protected=False,
+            )
+        return bool(self._finalized)
+
     async def _execute_tool_calls(
         self,
         *,
@@ -1469,26 +1811,15 @@ class BaseReverseRuntimeCore:
         for row in outputs:
             self._on_tool_execution_completed(row)
 
-        self.obs.emit(
-            "tool_batch_executed",
-            {
-                "turn_id": turn_id,
-                "agent_id": agent_id,
-                "agent_name": self.runtime_name,
-                "parent_agent_id": parent_agent_id,
-                "iteration": int(iteration),
-                "batch_size": len(outputs),
-                "parallel_limit": max_parallel,
-                "finalize_count": len(finalize_calls),
-                "success_count": len([row for row in outputs if not bool(row.get("is_error", False))]),
-                "error_count": len([row for row in outputs if bool(row.get("is_error", False))]),
-                "elapsed_ms": int((time.perf_counter() - started) * 1000),
-                "durations_ms": [int(row.get("duration_ms", 0)) for row in outputs],
-                "tool_calls": [self._build_tool_observability_row(row) for row in outputs],
-                "policy_id": self.policy_id,
-                "git_commit": self.git_commit,
-                "loop_mode": self.loop_mode,
-            },
+        self._emit_tool_batch_and_mutations(
+            turn_id=turn_id,
+            agent_id=agent_id,
+            parent_agent_id=parent_agent_id,
+            iteration=iteration,
+            outputs=outputs,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            parallel_limit=max_parallel,
+            finalize_count=len(finalize_calls),
         )
         return outputs
 
@@ -1623,6 +1954,12 @@ class BaseReverseRuntimeCore:
 
         for iteration in range(1, max_iters + 1):
             turn_id = f"{agent_id}:{iteration}:policy:{uuid.uuid4().hex[:8]}"
+            self._emit_turn_started(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+            )
             subagent_updates = self.subagent_mgr.drain_completed_updates(parent_agent_id=agent_id)
             if subagent_updates:
                 self.policy_mgr.append_message(
@@ -1648,6 +1985,18 @@ class BaseReverseRuntimeCore:
                     turn_id=turn_id,
                     protected=False,
                 )
+            budget_prompt = self._build_iteration_budget_prompt(
+                iteration=iteration,
+                max_iterations=max_iters,
+            )
+            if budget_prompt:
+                self.policy_mgr.append_message(
+                    messages=messages,
+                    message_obj=HumanMessage(content=budget_prompt),
+                    role="user",
+                    turn_id=turn_id,
+                    protected=False,
+                )
 
             include_context_tools = self._should_expose_context_tools(messages=messages, compression_prompt=compression_prompt)
             runtime_tools = self._make_runtime_tools(
@@ -1668,6 +2017,9 @@ class BaseReverseRuntimeCore:
                     "turn_id": turn_id,
                     "agent_id": agent_id,
                     "agent_name": self.runtime_name,
+                    "parent_agent_id": parent_agent_id,
+                    "iteration": iteration,
+                    "phase": self._phase_for_agent(agent_id),
                     "tools": [{"name": t.name, "description": getattr(t, "description", "")} for t in all_tools],
                 },
             )
@@ -1678,6 +2030,13 @@ class BaseReverseRuntimeCore:
                 agent_id=agent_id,
                 iteration=iteration,
                 messages_count=len(messages),
+            )
+            self._emit_llm_request_sent(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                messages=messages,
             )
             try:
                 response = await self._ainvoke_with_retry(llm_with_tools, messages, max_retries=self.llm_max_retries)
@@ -1694,9 +2053,23 @@ class BaseReverseRuntimeCore:
                         "turn_id": turn_id,
                         "agent_id": agent_id,
                         "agent_name": self.runtime_name,
+                        "parent_agent_id": parent_agent_id,
+                        "iteration": iteration,
+                        "phase": self._phase_for_agent(agent_id),
                         "error": str(e),
                         "messages": self._serialize_messages_for_log(messages),
                     },
+                )
+                self._emit_turn_completed(
+                    turn_id=turn_id,
+                    agent_id=agent_id,
+                    parent_agent_id=parent_agent_id,
+                    iteration=iteration,
+                    status="failed",
+                    latency_s=time.perf_counter() - interaction_started,
+                    usage={},
+                    tool_calls=[],
+                    error=str(e),
                 )
                 raise
 
@@ -1749,6 +2122,17 @@ class BaseReverseRuntimeCore:
                 usage["input_tokens"] = usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens")
                 usage["output_tokens"] = usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens")
 
+            self._emit_llm_response_received(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                response_text=response_text,
+                tool_calls=tool_calls,
+                latency_s=latency_s,
+                usage=usage,
+            )
+
             # 记录完整的消息历史，包括 system prompt 和之前的对话
             self.obs.emit(
                 "llm_interaction",
@@ -1763,6 +2147,34 @@ class BaseReverseRuntimeCore:
                     "usage": usage if usage.get("input_tokens") or usage.get("output_tokens") else None,
                 },
             )
+            self._emit_turn_completed(
+                turn_id=turn_id,
+                agent_id=agent_id,
+                parent_agent_id=parent_agent_id,
+                iteration=iteration,
+                status="completed",
+                latency_s=latency_s,
+                usage=usage,
+                tool_calls=tool_calls,
+            )
+
+            if (not self._finalized) and iteration >= max_iters:
+                forced = await self._attempt_forced_finalize(
+                    messages=messages,
+                    turn_id=turn_id,
+                    agent_id=agent_id,
+                    parent_agent_id=parent_agent_id,
+                    iteration=iteration,
+                    max_iterations=max_iters,
+                    tool_map=tool_map,
+                )
+                if forced and self._finalized:
+                    return {
+                        "final_text": self._final_text or self._build_final_text(),
+                        "iterations_used": iteration,
+                        "completed": True,
+                        "reason": "forced_finalize_after_max_iterations",
+                    }
 
             if self._finalized:
                 return {
@@ -1782,6 +2194,10 @@ class BaseReverseRuntimeCore:
     async def run(self, user_request: str, max_iterations: int = 30) -> str:
         self._init_session_logger()
         self._reset_runtime_state()
+        if self.last_session_id:
+            print(f"[LOG] Session ID: {self.last_session_id}")
+        if self.session_db_path:
+            print(f"[LOG] Session DB: {self.session_db_path}")
 
         # Set binary name for this session
         if self.session_logger:
@@ -1795,7 +2211,7 @@ class BaseReverseRuntimeCore:
 
         run_started = time.perf_counter()
         self.obs.emit(
-            "session_start",
+            "session_started",
             {
                 "user_request": str(user_request or "").strip(),
                 "agent_name": self.runtime_name,
@@ -1808,6 +2224,8 @@ class BaseReverseRuntimeCore:
                 "policy_id": self.policy_id,
                 "git_commit": self.git_commit,
                 "loop_mode": self.loop_mode,
+                "watch_run_id": self.watch_run_id,
+                "watch_log_path": self.watch_log_path,
             },
         )
 
@@ -1821,33 +2239,37 @@ class BaseReverseRuntimeCore:
             final_text = str(result.get("final_text", "") or "")
             iterations_used = int(result.get("iterations_used", 0) or 0)
             completed = bool(result.get("completed", False))
-            event_name = "session_complete" if completed else "session_incomplete"
             completion_payload = {
                 "duration_s": round(time.perf_counter() - run_started, 4),
                 "iterations_used": iterations_used,
                 "agent_name": self.runtime_name,
                 "final_response": AgentUtils.truncate(final_text, 12000),
                 "completed_reason": str(result.get("reason", "")),
+                "status": "completed" if completed else "incomplete",
                 "policy_id": self.policy_id,
                 "git_commit": self.git_commit,
                 "loop_mode": self.loop_mode,
+                "watch_run_id": self.watch_run_id,
             }
             completion_payload.update(self._build_session_complete_extension_payload())
             self.obs.emit(
-                event_name,
+                "run_finished",
                 completion_payload,
             )
             return final_text
         except Exception as e:
             self.obs.emit(
-                "session_incomplete",
+                "run_stopped",
                 {
                     "duration_s": round(time.perf_counter() - run_started, 4),
                     "agent_name": self.runtime_name,
                     "error": str(e),
+                    "status": "failed",
+                    "reason": "runtime_exception",
                     "policy_id": self.policy_id,
                     "git_commit": self.git_commit,
                     "loop_mode": self.loop_mode,
+                    "watch_run_id": self.watch_run_id,
                 },
             )
             raise
@@ -2169,26 +2591,15 @@ class ReverseRuntimeCore(BaseReverseRuntimeCore):
         for row in outputs:
             self._on_tool_execution_completed(row)
 
-        self.obs.emit(
-            "tool_batch_executed",
-            {
-                "turn_id": turn_id,
-                "agent_id": agent_id,
-                "agent_name": self.runtime_name,
-                "parent_agent_id": parent_agent_id,
-                "iteration": int(iteration),
-                "batch_size": len(outputs),
-                "parallel_limit": max_parallel,
-                "finalize_count": len(finalize_calls),
-                "success_count": len([row for row in outputs if not bool(row.get("is_error", False))]),
-                "error_count": len([row for row in outputs if bool(row.get("is_error", False))]),
-                "elapsed_ms": int((time.perf_counter() - started) * 1000),
-                "durations_ms": [int(row.get("duration_ms", 0)) for row in outputs],
-                "tool_calls": [self._build_tool_observability_row(row) for row in outputs],
-                "policy_id": self.policy_id,
-                "git_commit": self.git_commit,
-                "loop_mode": self.loop_mode,
-            },
+        self._emit_tool_batch_and_mutations(
+            turn_id=turn_id,
+            agent_id=agent_id,
+            parent_agent_id=parent_agent_id,
+            iteration=iteration,
+            outputs=outputs,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            parallel_limit=max_parallel,
+            finalize_count=len(finalize_calls),
         )
         return outputs
 

@@ -1,3 +1,5 @@
+import re
+
 import idc
 import ida_hexrays
 import ida_nalt
@@ -9,7 +11,7 @@ operations = __OPERATIONS__
 redecompile = bool(__REDECOMPILE__)
 
 
-def _parse_data_tinfo(c_type_text):
+def _parse_data_tinfo_once(c_type_text):
     tif = ida_typeinf.tinfo_t()
     type_text = str(c_type_text or "").strip()
     if not type_text:
@@ -23,6 +25,45 @@ def _parse_data_tinfo(c_type_text):
     if bool(tif.empty()):
         return None, f"failed to parse type: {type_text}"
     return tif, ""
+
+
+def _rewrite_struct_tag_type(type_text):
+    text = str(type_text or "").strip()
+    if not text:
+        return ""
+    if text.startswith("struct "):
+        return ""
+
+    match = re.match(
+        r"^(?P<prefix>(?:(?:const|volatile)\s+)*)?(?P<name>[A-Za-z_]\w*)(?P<suffix>\s*(?:\*.*)?)$",
+        text,
+    )
+    if not match:
+        return ""
+
+    struct_name = str(match.group("name") or "").strip()
+    if not struct_name:
+        return ""
+    if idc.get_struc_id(struct_name) == idc.BADADDR:
+        return ""
+
+    prefix = str(match.group("prefix") or "")
+    suffix = str(match.group("suffix") or "")
+    return f"{prefix}struct {struct_name}{suffix}".strip()
+
+
+def _parse_data_tinfo(c_type_text):
+    tif, err = _parse_data_tinfo_once(c_type_text)
+    if tif is not None:
+        return tif, ""
+
+    fallback_text = _rewrite_struct_tag_type(c_type_text)
+    if fallback_text and fallback_text != str(c_type_text or "").strip():
+        tif_retry, err_retry = _parse_data_tinfo_once(fallback_text)
+        if tif_retry is not None:
+            return tif_retry, ""
+        return None, err_retry
+    return None, err
 
 
 def _get_function_details(func_ea):

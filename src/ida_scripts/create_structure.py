@@ -155,6 +155,82 @@ def _get_idati():
         return idaapi.cvar.idati
 
 
+def _simplify_decl_for_retry(name, decl_text):
+    text = str(decl_text or "").strip()
+    if not text:
+        return ""
+
+    final_name = str(name or "").strip()
+    simplified = text
+    if final_name:
+        simplified = re.sub(
+            rf"^\s*typedef\s+struct\s+{re.escape(final_name)}\s+{re.escape(final_name)}\s*;\s*$",
+            "",
+            simplified,
+            flags=re.MULTILINE,
+        )
+
+    fp_aliases = []
+
+    def _drop_fp_typedef(match):
+        alias = str(match.group("alias") or "").strip()
+        if alias:
+            fp_aliases.append(alias)
+        return ""
+
+    simplified = re.sub(
+        r"^\s*typedef\s+.+?\(\s*\*\s*(?P<alias>[A-Za-z_]\w*)\s*\)\s*\([^;]*\)\s*;\s*$",
+        _drop_fp_typedef,
+        simplified,
+        flags=re.MULTILINE,
+    )
+    for alias in fp_aliases:
+        simplified = re.sub(rf"\b{re.escape(alias)}\b", "void *", simplified)
+
+    builtin_types = {
+        "void",
+        "char",
+        "signed",
+        "unsigned",
+        "short",
+        "long",
+        "int",
+        "__int64",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "size_t",
+        "bool",
+        "_BYTE",
+        "_WORD",
+        "_DWORD",
+        "_QWORD",
+    }
+
+    def _replace_alias_pointer_field(match):
+        indent = str(match.group("indent") or "")
+        base = str(match.group("base") or "").strip()
+        stars = str(match.group("stars") or "")
+        field = str(match.group("field") or "").strip()
+        suffix = str(match.group("suffix") or "")
+        if not base or base in builtin_types:
+            return str(match.group(0) or "")
+        return f"{indent}void {stars} {field};{suffix}"
+
+    simplified = re.sub(
+        r"^(?P<indent>\s*)(?P<base>[A-Za-z_]\w*)\s*(?P<stars>\*+)\s*(?P<field>[A-Za-z_]\w*)\s*;(?P<suffix>\s*(?://.*)?)$",
+        _replace_alias_pointer_field,
+        simplified,
+        flags=re.MULTILINE,
+    )
+    return str(simplified or "").strip()
+
+
 def _parse_struct_decl_to_tinfo(decl_text):
     tif = ida_typeinf.tinfo_t()
     ida_typeinf.parse_decl(
@@ -166,6 +242,42 @@ def _parse_struct_decl_to_tinfo(decl_text):
     if bool(tif.empty()):
         return None, "C declaration parse failed"
     return tif, ""
+
+
+def _parse_decl_with_retry(name, decl_text):
+    tif, parse_error = _parse_struct_decl_to_tinfo(decl_text)
+    if tif is not None:
+        return tif, "", str(decl_text or "").strip()
+
+    simplified = _simplify_decl_for_retry(name, decl_text)
+    if simplified and simplified != str(decl_text or "").strip():
+        tif_retry, parse_error_retry = _parse_struct_decl_to_tinfo(simplified)
+        if tif_retry is not None:
+            return tif_retry, "", simplified
+        return None, str(parse_error_retry or parse_error or "C declaration parse failed"), simplified
+    return None, str(parse_error or "C declaration parse failed"), str(decl_text or "").strip()
+
+
+def _struct_name_candidates(name):
+    final_name = str(name or "").strip()
+    if not final_name:
+        return []
+    candidates = [final_name]
+    if not final_name.startswith("struct "):
+        candidates.append(f"struct {final_name}")
+    deduped = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def _resolve_struct_sid(name):
+    for candidate in _struct_name_candidates(name):
+        sid = idc.get_struc_id(candidate)
+        if sid != idc.BADADDR:
+            return sid, candidate
+    return idc.BADADDR, ""
 
 
 def _set_named_struct_type(tif, name):
@@ -191,6 +303,24 @@ def _set_named_struct_type(tif, name):
     except Exception:
         pass
     return False, rc_int, err_text
+
+
+def _import_type_to_idb(name):
+    badnode = int(getattr(idaapi, "BADNODE", getattr(idc, "BADADDR", -1)))
+    last_tid = -1
+    for candidate in _struct_name_candidates(name):
+        try:
+            imported = idc.import_type(-1, str(candidate))
+        except Exception:
+            continue
+        try:
+            imported_int = int(imported)
+        except Exception:
+            continue
+        last_tid = imported_int
+        if imported_int != badnode:
+            return True, imported_int
+    return False, last_tid
 
 
 def _strip_llm_struct_block(text):
@@ -290,11 +420,11 @@ def _run():
             "mutation_effective": False,
         }
 
-    before_sid = idc.get_struc_id(final_name)
+    before_sid, before_sid_name = _resolve_struct_sid(final_name)
     struct_existed = before_sid != idc.BADADDR
     before_sig = _struct_signature(before_sid) if struct_existed else []
 
-    tif, parse_error = _parse_struct_decl_to_tinfo(final_c_decl)
+    tif, parse_error, effective_c_decl = _parse_decl_with_retry(final_name, final_c_decl)
     if tif is None:
         return {
             "success": False,
@@ -303,12 +433,19 @@ def _run():
             "error": str(parse_error or "C declaration parse failed"),
             "mutation_effective": False,
             "input_c_decl": str(final_c_decl),
+            "effective_c_decl": str(effective_c_decl or ""),
         }
 
     save_ok, save_rc, save_error = _set_named_struct_type(tif, final_name)
 
-    after_sid = idc.get_struc_id(final_name)
+    after_sid, after_sid_name = _resolve_struct_sid(final_name)
     struct_visible = after_sid != idc.BADADDR
+    import_type_ok = False
+    import_type_tid = -1
+    if save_ok and (not struct_visible):
+        import_type_ok, import_type_tid = _import_type_to_idb(final_name)
+        after_sid, after_sid_name = _resolve_struct_sid(final_name)
+        struct_visible = after_sid != idc.BADADDR
     created_struct = bool((not struct_existed) and struct_visible)
     after_sig = _struct_signature(after_sid) if struct_visible else []
     mutation_effective = bool(created_struct or (before_sig != after_sig))
@@ -321,6 +458,7 @@ def _run():
     result = {
         "success": bool(save_ok),
         "struct_name": final_name,
+        "resolved_struct_name": str(after_sid_name or before_sid_name or final_name),
         "sid": int(after_sid) if struct_visible else -1,
         "struct_existed": bool(struct_existed),
         "created_struct": bool(created_struct),
@@ -329,6 +467,9 @@ def _run():
         "applied_with": "tinfo_t.set_named_type",
         "set_named_type_rc": int(save_rc),
         "input_c_decl": str(final_c_decl),
+        "effective_c_decl": str(effective_c_decl or final_c_decl),
+        "import_type_ok": bool(import_type_ok),
+        "import_type_tid": int(import_type_tid),
         "comment_requested": bool(comment_requested),
         "comment_apply_ok": bool(comment_apply_ok),
         "comment_changed": bool(comment_changed),

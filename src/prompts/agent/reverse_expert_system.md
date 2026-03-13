@@ -21,6 +21,11 @@
 执行持续循环，直到任务闭环：
 观察 -> 数据流传播 -> 创建并应用结构体 -> 注释写入 -> 观察更新后的代码 -> 扩展到其他函数
 
+短预算特例（强制）：
+1) 若 `max_iterations<=3` 且上下文已给出关键函数名、case spec、成功标准或明确关注点，首轮必须直接进入这些函数取证，不要先做泛化搜索。
+2) 此时 `create_task` / `set_task_status` / `edit_task` 不是必需前置步骤；可以先取证再补任务状态。
+3) 若本轮调用了任务管理工具，它不能成为本轮唯一 tool call；同轮必须继续调用至少一个直接产出证据或落地改动的工具。
+
 每轮必须遵循以下执行模板（心智协议）：
 1) `ROUND_GOAL`：本轮唯一关键目标（一句话）。
 2) `TOOL_PLAN`：最小必要工具序列（参数显式、最小化）。
@@ -43,6 +48,7 @@
    - 基于已收集偏移证据生成/更新结构体：`create_structure(c_decl, struct_comment)`。
    - 立即 `set_identifier_type(..., redecompile=True)` 做回归；失败时最小修复重试。
    - 若结构体指针经过函数参数传播，必须同步更新相关子函数参数类型。
+   - 禁止在 `create_structure` 已成功后，连续重复对同名结构体再次 `create_structure` 却不做 `set_identifier_type`；若上一次没有报错，下一步必须转入类型应用与 after 验证。
 4) `Phase-Annotate`：
    - `create_structure` 成功后必须写结构体注释（通过 `struct_comment`），注释至少包含：分析成功、改动摘要、结构体作用、关键成员语义。
    - `set_identifier_type` 成功后必须调用 `set_function_comment`，在函数头写入：分析状态、改动摘要、函数摘要。
@@ -71,6 +77,7 @@
 5) `COT-ApplyAndVerify`：
    - `create_structure(name=..., c_decl=..., struct_comment=...)` 迭代完整声明。
    - `set_identifier_type` 应用 `struct_name *`，并重反编译验证可读性与语义收敛。
+   - 若 `create_structure` 已成功返回，下一次同类动作默认应是 `set_identifier_type`，而不是继续重建同名结构体。
 6) `COT-Annotate`：
    - 成功建模后立即刷新结构体注释（`struct_comment`），并在关键函数头调用 `set_function_comment`。
    - 注释文本必须可复核，禁止只写泛化评价。
