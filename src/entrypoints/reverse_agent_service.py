@@ -200,6 +200,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--idapython-kb-dir", default="", help="Optional IDAPython KB dir")
     parser.add_argument("--report-dir", default="", help="Optional report directory")
+    parser.add_argument("--case-id", default="", help="Optional eval case id")
+    parser.add_argument("--case-spec-path", default="", help="Optional eval case spec markdown path")
+    parser.add_argument("--evidence-function", action="append", default=[], help="Preferred function names for evidence decompile")
     return parser
 
 
@@ -420,6 +423,9 @@ def _build_reverse_run_namespace(
         agent_profile=str(args.agent_profile or "struct_recovery"),
         idapython_kb_dir=str(args.idapython_kb_dir or ""),
         report_dir=str(report_dir or DEFAULT_REPORT_DIR),
+        case_id=str(getattr(args, "case_id", "") or ""),
+        case_spec_path=str(getattr(args, "case_spec_path", "") or ""),
+        evidence_function=list(getattr(args, "evidence_function", []) or []),
     )
 
 
