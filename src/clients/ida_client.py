@@ -1,7 +1,12 @@
 """IDA Service HTTP 客户端"""
+import os
+import re
+import shutil
+import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import requests
-from typing import Dict, Any, Optional, List
 
 
 class IDAClient:
@@ -20,6 +25,46 @@ class IDAClient:
         self.script_template_dir = (
             Path(__file__).resolve().parent.parent / "ida_scripts"
         )
+        self.session = requests.Session()
+        self.session.trust_env = False
+
+    def _safe_name(self, text: str) -> str:
+        value = re.sub(r"[^0-9A-Za-z._-]+", "_", str(text or "").strip())
+        return value.strip("_")
+
+    def _build_backup_target_path(
+        self,
+        source_path: str,
+        backup_dir: Optional[str] = None,
+        tag: str = "",
+        filename: str = "",
+    ) -> str:
+        current_path = str(source_path or "").strip()
+        if not current_path:
+            raise ValueError("source_path is required")
+
+        requested_dir = str(backup_dir or "").strip()
+        requested_tag = self._safe_name(tag)
+        requested_filename = str(filename or "").strip()
+
+        if not requested_dir:
+            requested_dir = os.path.join(os.path.dirname(current_path), "backups")
+        os.makedirs(requested_dir, exist_ok=True)
+
+        base_name = os.path.basename(current_path)
+        stem, ext = os.path.splitext(base_name)
+        if not ext:
+            ext = ".i64"
+
+        if requested_filename:
+            target_path = os.path.join(requested_dir, requested_filename)
+            if not os.path.splitext(target_path)[1]:
+                target_path = target_path + ext
+            return target_path
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        suffix = requested_tag or "backup"
+        return os.path.join(requested_dir, f"{stem}_{timestamp}_{suffix}{ext}")
 
     def _resolve_script_template_path(self, template_name: str) -> Path:
         name = str(template_name or "").strip()
@@ -82,7 +127,7 @@ class IDAClient:
 
     def health_check(self) -> Dict[str, Any]:
         """健康检查"""
-        response = requests.get(f"{self.base_url}/health", timeout=5)
+        response = self.session.get(f"{self.base_url}/health", timeout=5)
         response.raise_for_status()
         return response.json()
     
@@ -100,7 +145,7 @@ class IDAClient:
             "run_auto_analysis": bool(run_auto_analysis),
             "save_current": bool(save_current),
         }
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/db/open",
             json=payload,
             timeout=self.timeout,
@@ -118,7 +163,7 @@ class IDAClient:
         """
         运行时关闭当前数据库。
         """
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/db/close",
             json={"save": bool(save)},
             timeout=self.timeout,
@@ -134,7 +179,7 @@ class IDAClient:
     
     def get_db_info(self) -> Dict[str, Any]:
         """获取当前数据库信息"""
-        response = requests.get(f"{self.base_url}/db/info", timeout=self.timeout)
+        response = self.session.get(f"{self.base_url}/db/info", timeout=self.timeout)
         response.raise_for_status()
         return response.json()
 
@@ -152,41 +197,32 @@ class IDAClient:
             tag: 备份标签（可选）
             filename: 目标文件名（可选，不带扩展名时会自动补）
         """
-        payload: Dict[str, Any] = {}
-        if backup_dir:
-            payload["backup_dir"] = str(backup_dir)
-        if tag:
-            payload["tag"] = str(tag)
-        if filename:
-            payload["filename"] = str(filename)
+        db_info = self.get_db_info()
+        if not db_info.get("success"):
+            raise Exception(db_info.get("error", "get_db_info request failed"))
 
-        try:
-            response = requests.post(
-                f"{self.base_url}/db/backup",
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            result = response.json()
-            if not result.get("success"):
-                raise Exception(result.get("error", "backup_database request failed"))
+        info = db_info.get("result")
+        if not isinstance(info, dict):
+            raise Exception(f"Unexpected get_db_info payload type: {type(info).__name__}")
 
-            data = result.get("result")
-            if not isinstance(data, dict):
-                raise Exception(f"Unexpected backup_database payload type: {type(data).__name__}")
-            if not data.get("success"):
-                raise Exception(data.get("error", "IDB backup failed"))
-            return data
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response is not None else 0
-            if int(status) != 404:
-                raise
-            # Backward-compatible fallback for old ida_service without /db/backup.
-            return self._backup_database_via_execute(
-                backup_dir=backup_dir,
-                tag=tag,
-                filename=filename,
-            )
+        current_path = str(info.get("path", "") or "").strip()
+        if not current_path:
+            raise Exception("empty current idb path")
+
+        target_path = self._build_backup_target_path(
+            source_path=current_path,
+            backup_dir=backup_dir,
+            tag=tag,
+            filename=filename,
+        )
+        shutil.copy2(current_path, target_path)
+        return {
+            "success": True,
+            "source_path": current_path,
+            "backup_path": target_path,
+            "method": "shutil.copy2",
+            "error": "",
+        }
 
     def _backup_database_via_execute(
         self,
@@ -375,7 +411,7 @@ else:
         Returns:
             执行结果，包含 success, result, stdout, stderr, execution_time
         """
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/execute",
             json={"script": script, "context": context or {}},
             timeout=self.timeout
@@ -390,7 +426,7 @@ else:
         Returns:
             函数列表，每个函数包含 ea, name, size
         """
-        response = requests.get(f"{self.base_url}/functions", timeout=self.timeout)
+        response = self.session.get(f"{self.base_url}/functions", timeout=self.timeout)
         response.raise_for_status()
         result = response.json()
         if result.get('success'):
@@ -432,7 +468,7 @@ else:
         if resolved_ea is not None:
             data["ea"] = int(resolved_ea)
         
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/decompile",
             json=data,
             timeout=self.timeout
@@ -468,7 +504,7 @@ else:
             "count": int(count),
             "flags": str(flags or "IGNORECASE"),
         }
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/search",
             json=payload,
             timeout=self.timeout,
@@ -510,7 +546,7 @@ else:
             "count": int(count),
             "flags": str(flags or "IGNORECASE"),
         }
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/xrefs",
             json=payload,
             timeout=self.timeout,

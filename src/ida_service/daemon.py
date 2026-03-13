@@ -5,6 +5,7 @@ IDA Service Daemon
 - 串行执行所有 IDA 脚本（主线程约束）
 """
 import argparse
+import json
 import logging
 import os
 import re
@@ -48,6 +49,54 @@ _db_state: Dict[str, Any] = {
     "path": None,
     "opened_at": None,
 }
+_service_state: Dict[str, Any] = {
+    "is_executing": False,
+    "current_script": "",
+    "current_script_started_at": None,
+    "last_script": "",
+    "last_duration_ms": 0,
+    "last_execute_success": None,
+    "last_error": "",
+    "last_event": "",
+    "last_event_at": None,
+    "timeout_count": 0,
+    "execute_count": 0,
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _script_preview(code: str, limit: int = 160) -> str:
+    text = " ".join(str(code or "").split())
+    return text[:limit]
+
+
+def _emit_service_event(event: str, **payload: Any) -> None:
+    _service_state["last_event"] = str(event or "").strip()
+    _service_state["last_event_at"] = _utc_now_iso()
+    data = {"event": str(event or "").strip(), **payload, "at": _service_state["last_event_at"]}
+    logger.info("EVENT %s", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+
+def _service_status_snapshot() -> Dict[str, Any]:
+    return {
+        "is_executing": bool(_service_state["is_executing"]),
+        "current_script": str(_service_state["current_script"] or ""),
+        "current_script_started_at": _service_state["current_script_started_at"],
+        "last_script": str(_service_state["last_script"] or ""),
+        "last_duration_ms": int(_service_state["last_duration_ms"] or 0),
+        "last_execute_success": _service_state["last_execute_success"],
+        "last_error": str(_service_state["last_error"] or ""),
+        "last_event": str(_service_state["last_event"] or ""),
+        "last_event_at": _service_state["last_event_at"],
+        "timeout_count": int(_service_state["timeout_count"] or 0),
+        "execute_count": int(_service_state["execute_count"] or 0),
+        "db_opened": bool(_db_state["opened"]),
+        "db_path": _db_state["path"],
+        "db_opened_at": _db_state["opened_at"],
+    }
 
 
 def setup_logging(log_dir: str, debug: bool = False) -> str:
@@ -87,15 +136,59 @@ def _execute_serialized(code: str, context: Optional[Dict] = None) -> Tuple[Dict
     """串行执行脚本，避免并发调用 IDA SDK。"""
     with _exec_lock:
         started = time.time()
-        result = execute_script(code, context)
-        elapsed = time.time() - started
-        if elapsed > config.SCRIPT_TIMEOUT:
-            logger.warning(
-                "Script exceeded configured timeout: %.2fs > %ss",
-                elapsed,
-                config.SCRIPT_TIMEOUT,
+        preview = _script_preview(code)
+        _service_state["is_executing"] = True
+        _service_state["current_script"] = preview
+        _service_state["current_script_started_at"] = _utc_now_iso()
+        _service_state["last_script"] = preview
+        _service_state["execute_count"] = int(_service_state["execute_count"] or 0) + 1
+        _service_state["last_error"] = ""
+        _emit_service_event(
+            "execute_start",
+            script_preview=preview,
+            context_keys=sorted((context or {}).keys())[:12],
+            timeout_sec=int(config.SCRIPT_TIMEOUT),
+        )
+        result: Dict[str, Any] = {}
+        success = False
+        error_text = ""
+        try:
+            result = execute_script(code, context)
+            success = bool(result.get("success", False))
+            error_text = str(result.get("error") or result.get("stderr") or "")
+            return result, time.time() - started
+        except Exception as e:
+            error_text = str(e)
+            raise
+        finally:
+            elapsed = time.time() - started
+            timeout_hit = elapsed > config.SCRIPT_TIMEOUT
+            _service_state["is_executing"] = False
+            _service_state["current_script"] = ""
+            _service_state["current_script_started_at"] = None
+            _service_state["last_duration_ms"] = int(elapsed * 1000)
+            _service_state["last_execute_success"] = bool(success)
+            _service_state["last_error"] = error_text[:800]
+            if timeout_hit:
+                _service_state["timeout_count"] = int(_service_state["timeout_count"] or 0) + 1
+                logger.warning(
+                    "Script exceeded configured timeout: %.2fs > %ss",
+                    elapsed,
+                    config.SCRIPT_TIMEOUT,
+                )
+                _emit_service_event(
+                    "execute_timeout",
+                    script_preview=preview,
+                    duration_ms=int(elapsed * 1000),
+                    timeout_sec=int(config.SCRIPT_TIMEOUT),
+                )
+            _emit_service_event(
+                "execute_end",
+                script_preview=preview,
+                success=bool(success),
+                duration_ms=int(elapsed * 1000),
+                error=error_text[:400],
             )
-        return result, elapsed
 
 
 def _require_db_opened():
@@ -130,10 +223,28 @@ def _save_current_database_as(target_path: str) -> str:
     normalized = _normalize_path(target_path)
     folder = os.path.dirname(normalized) or "."
     os.makedirs(folder, exist_ok=True)
-    ok = bool(idc.save_database(normalized, 0))
-    if not ok:
-        raise RuntimeError(f"save_database failed: {normalized}")
-    return str(idc.get_idb_path() or normalized).strip()
+    script = r'''
+import idc
+target_path = str(target_path or "").strip()
+if not target_path:
+    __result__ = {"success": False, "error": "empty target_path"}
+else:
+    ok = bool(idc.save_database(target_path, 0))
+    __result__ = {
+        "success": bool(ok),
+        "path": str(idc.get_idb_path() or target_path).strip(),
+        "error": "" if ok else f"save_database failed: {target_path}",
+    }
+'''
+    result, _elapsed = _execute_serialized(script, {"target_path": normalized})
+    if not bool(result.get("success")):
+        raise RuntimeError(str(result.get("error") or "save_database script failed"))
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"unexpected save_database payload: {type(payload).__name__}")
+    if not bool(payload.get("success")):
+        raise RuntimeError(str(payload.get("error") or f"save_database failed: {normalized}"))
+    return str(payload.get("path") or normalized).strip()
 
 
 def _set_db_opened(path: str):
@@ -187,15 +298,27 @@ def _close_database_locked(save: bool = True) -> Dict[str, Any]:
 
     started = time.time()
     closed_path = str(idc.get_idb_path() or _db_state.get("path") or "").strip()
-    idapro.close_database(bool(save))
-    _set_db_closed()
-    elapsed = time.time() - started
-    logger.info("Database closed in %.2fs: %s (saved=%s)", elapsed, closed_path or "unknown", bool(save))
-    return {
-        "already_closed": False,
-        "closed_path": closed_path,
-        "saved": bool(save),
-    }
+    _emit_service_event("db_close_start", path=closed_path, save=bool(save))
+    try:
+        idapro.close_database(bool(save))
+        _set_db_closed()
+        elapsed = time.time() - started
+        logger.info("Database closed in %.2fs: %s (saved=%s)", elapsed, closed_path or "unknown", bool(save))
+        _emit_service_event(
+            "db_close_end",
+            path=closed_path,
+            save=bool(save),
+            duration_ms=int(elapsed * 1000),
+        )
+        return {
+            "already_closed": False,
+            "closed_path": closed_path,
+            "saved": bool(save),
+        }
+    except Exception as e:
+        _service_state["last_error"] = str(e)[:800]
+        _emit_service_event("db_close_failed", path=closed_path, save=bool(save), error=str(e)[:400])
+        raise
 
 
 def _open_database_locked(
@@ -212,74 +335,109 @@ def _open_database_locked(
     normalized_input_path = _normalize_path(input_path)
     if not os.path.exists(normalized_input_path):
         raise RuntimeError(f"Input file not found: {normalized_input_path}")
+    _emit_service_event(
+        "db_open_start",
+        input_path=normalized_input_path,
+        run_auto_analysis=bool(run_auto_analysis),
+        save_current=bool(save_current),
+    )
 
-    resolved_open_path = normalized_input_path
-    if not _is_idb_path(normalized_input_path):
-        preferred_idb = _default_idb_path_for_binary(normalized_input_path)
-        if os.path.exists(preferred_idb):
-            resolved_open_path = preferred_idb
+    try:
+        resolved_open_path = normalized_input_path
+        if not _is_idb_path(normalized_input_path):
+            preferred_idb = _default_idb_path_for_binary(normalized_input_path)
+            if os.path.exists(preferred_idb):
+                resolved_open_path = preferred_idb
 
-    switched_from = ""
-    close_result = None
-    already_open = False
+        switched_from = ""
+        close_result = None
+        already_open = False
 
-    if _db_state["opened"]:
-        current_path = str(idc.get_idb_path() or _db_state.get("path") or "").strip()
-        if current_path and _normalize_path(current_path) == _normalize_path(resolved_open_path):
-            already_open = True
-        else:
-            switched_from = current_path
-            close_result = _close_database_locked(save=bool(save_current))
+        if _db_state["opened"]:
+            current_path = str(idc.get_idb_path() or _db_state.get("path") or "").strip()
+            if current_path and _normalize_path(current_path) == _normalize_path(resolved_open_path):
+                already_open = True
+            else:
+                switched_from = current_path
+                close_result = _close_database_locked(save=bool(save_current))
 
-    if already_open:
+        if already_open:
+            _emit_service_event(
+                "db_open_end",
+                input_path=normalized_input_path,
+                resolved_open_path=resolved_open_path,
+                active_path=str(_db_state.get("path") or ""),
+                duration_ms=0,
+                run_auto_analysis=bool(run_auto_analysis),
+                already_open=True,
+            )
+            return {
+                "path": str(_db_state.get("path") or ""),
+                "opened_at": str(_db_state.get("opened_at") or ""),
+                "already_open": True,
+                "switched_from": "",
+                "close_result": None,
+                "normalized_input_path": normalized_input_path,
+                "resolved_open_path": resolved_open_path,
+                "initialized_idb_path": "",
+                "cleanup_result": {"directory": os.path.dirname(resolved_open_path), "deleted_count": 0, "deleted_files": []},
+            }
+
+        cleanup_result = {"directory": os.path.dirname(resolved_open_path), "deleted_count": 0, "deleted_files": []}
+        if not _is_idb_path(resolved_open_path):
+            cleanup_result = _cleanup_unpacked_idb_files_in_dir(resolved_open_path)
+
+        started = time.time()
+        open_ret = idapro.open_database(resolved_open_path, bool(run_auto_analysis))
+        if bool(open_ret):
+            raise RuntimeError(f"idapro.open_database failed with code: {open_ret} (path={resolved_open_path})")
+        active_path = str(idc.get_idb_path() or resolved_open_path).strip()
+
+        initialized_idb_path = ""
+        if not _is_idb_path(resolved_open_path):
+            preferred_idb = _default_idb_path_for_binary(normalized_input_path)
+            if _normalize_path(active_path) != _normalize_path(preferred_idb):
+                active_path = _save_current_database_as(preferred_idb)
+            initialized_idb_path = _normalize_path(preferred_idb)
+
+        _set_db_opened(active_path)
+        elapsed = time.time() - started
+        logger.info(
+            "Database opened in %.2fs: %s (run_auto_analysis=%s)",
+            elapsed,
+            active_path,
+            bool(run_auto_analysis),
+        )
+        _emit_service_event(
+            "db_open_end",
+            input_path=normalized_input_path,
+            resolved_open_path=resolved_open_path,
+            active_path=active_path,
+            duration_ms=int(elapsed * 1000),
+            run_auto_analysis=bool(run_auto_analysis),
+            already_open=False,
+        )
         return {
-            "path": str(_db_state.get("path") or ""),
+            "path": active_path,
             "opened_at": str(_db_state.get("opened_at") or ""),
-            "already_open": True,
-            "switched_from": "",
-            "close_result": None,
+            "already_open": False,
+            "switched_from": switched_from,
+            "close_result": close_result,
             "normalized_input_path": normalized_input_path,
             "resolved_open_path": resolved_open_path,
-            "initialized_idb_path": "",
-            "cleanup_result": {"directory": os.path.dirname(resolved_open_path), "deleted_count": 0, "deleted_files": []},
+            "initialized_idb_path": initialized_idb_path,
+            "cleanup_result": cleanup_result,
         }
-
-    cleanup_result = {"directory": os.path.dirname(resolved_open_path), "deleted_count": 0, "deleted_files": []}
-    if not _is_idb_path(resolved_open_path):
-        cleanup_result = _cleanup_unpacked_idb_files_in_dir(resolved_open_path)
-
-    started = time.time()
-    open_ret = idapro.open_database(resolved_open_path, bool(run_auto_analysis))
-    if bool(open_ret):
-        raise RuntimeError(f"idapro.open_database failed with code: {open_ret} (path={resolved_open_path})")
-    active_path = str(idc.get_idb_path() or resolved_open_path).strip()
-
-    initialized_idb_path = ""
-    if not _is_idb_path(resolved_open_path):
-        preferred_idb = _default_idb_path_for_binary(normalized_input_path)
-        if _normalize_path(active_path) != _normalize_path(preferred_idb):
-            active_path = _save_current_database_as(preferred_idb)
-        initialized_idb_path = _normalize_path(preferred_idb)
-
-    _set_db_opened(active_path)
-    elapsed = time.time() - started
-    logger.info(
-        "Database opened in %.2fs: %s (run_auto_analysis=%s)",
-        elapsed,
-        active_path,
-        bool(run_auto_analysis),
-    )
-    return {
-        "path": active_path,
-        "opened_at": str(_db_state.get("opened_at") or ""),
-        "already_open": False,
-        "switched_from": switched_from,
-        "close_result": close_result,
-        "normalized_input_path": normalized_input_path,
-        "resolved_open_path": resolved_open_path,
-        "initialized_idb_path": initialized_idb_path,
-        "cleanup_result": cleanup_result,
-    }
+    except Exception as e:
+        _service_state["last_error"] = str(e)[:800]
+        _emit_service_event(
+            "db_open_failed",
+            input_path=normalized_input_path,
+            run_auto_analysis=bool(run_auto_analysis),
+            save_current=bool(save_current),
+            error=str(e)[:400],
+        )
+        raise
 
 
 def _open_database_on_startup(input_path: str):
@@ -305,6 +463,17 @@ def health_check():
             "db_opened": _db_state["opened"],
             "db_path": _db_state["path"],
             "db_opened_at": _db_state["opened_at"],
+            "service_status": _service_status_snapshot(),
+        }
+    )
+
+
+@app.route("/status", methods=["GET"])
+def service_status():
+    return jsonify(
+        {
+            "status": "ok",
+            "service": _service_status_snapshot(),
         }
     )
 
@@ -412,9 +581,10 @@ def backup_db():
         save_method = ""
         save_error = ""
         try:
-            save_ok = bool(idc.save_database(target_path, 0))
-            if save_ok:
-                save_method = "idc.save_database"
+            saved_path = _save_current_database_as(target_path)
+            save_ok = True
+            save_method = "execute_script.save_database"
+            target_path = str(saved_path or target_path).strip() or target_path
         except Exception as e:
             save_error = str(e)
             save_ok = False
