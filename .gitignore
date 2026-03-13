@@ -26,6 +26,8 @@ logs/
 .vscode/
 .idea/
 .codebuddy/
+.claude/settings.local.json
+.codex/settings.local.json
 
 # OS files
 .DS_Store

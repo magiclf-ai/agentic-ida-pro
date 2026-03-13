@@ -33,7 +33,7 @@
 - 强制验证闭环：结构体创建后必须类型应用并重反编译
 - 任务板原生支持：`todo/in_progress/blocked/done` 可追踪
 - 会话可观测性：SQLite 持久化 turn/message/tool/event
-- 运行验收报告：自动生成 before/after 结构体 diff 与 acceptance summary
+- 证据驱动评测：自动沉淀 `run_trace.md` / `evidence.md` / `verdict.md`
 
 ---
 
@@ -164,16 +164,20 @@ IDB / Hex-Rays / IDA APIs
 │   │   ├── reverse_expert.py          # 主分析流程
 │   │   ├── logs.py                    # 日志服务
 │   │   └── observability_api.py       # 可观测性 API
-│   ├── skills/                    # 技能定义
+│   ├── skills/                    # 系统知识类技能（运行时加载）
 │   │   ├── struct_recovery/           # 结构体恢复技能
 │   │   ├── function_analysis/         # 函数分析技能
 │   │   └── string_decrypt/            # 字符串解密技能
-│   └── STRUCTURE.md               # 详细的源码结构说明文档
 ├── frontend/observability/        # 可观测性前端 (Vue)
 │   ├── src/
 │   │   ├── components/                # Vue 组件
 │   │   └── ...
 │   └── package.json
+├── dev_skills/                    # 开发调试类技能（Claude/Codex 共享 skill 源）
+│   ├── run-full-system-eval/          # 整系统评测编排
+│   ├── live-trace-triage/             # 运行中排障
+│   ├── judge-reverse-quality/         # 评判恢复质量
+│   └── author-regression-case/        # 沉淀回归 case
 ├── logs/                          # 会话日志、报告产物
 │   ├── agent_reports/                 # Agent 分析报告
 │   └── agent_sessions/                # 会话可观测性数据库
@@ -186,8 +190,6 @@ IDB / Hex-Rays / IDA APIs
 - **runtime/** - 运行时核心、各种管理器和上下文处理
 - **core/** - 数据模型、工具定义、通用工具和基础设施
 - **clients/** - 与外部服务交互的客户端（IDA、未来可能的其他服务）
-
-详细的模块导入规范和设计原则请参考 `src/STRUCTURE.md`。
 
 ---
 
@@ -565,13 +567,9 @@ logs/agent_reports/<session_id>_<timestamp>/
 
 典型文件：
 
+- `run_trace.md`
+- `evidence.md`
 - `agent_final_output.txt`
-- `before_structs.json`
-- `after_structs.json`
-- `struct_diff_summary.json`
-- `struct_definitions_new_or_changed.txt`
-- `acceptance_summary.md`
-- `acceptance_summary.json`
 - `idb_backup.json`
 - `ida_snapshot_before.json`
 - `ida_snapshot_after.json`
@@ -592,16 +590,21 @@ logs/agent_sessions/agent_observability.sqlite3
 
 ---
 
-## 14. 验收机制（reverse_expert）
+## 14. 证据采集机制（reverse_expert）
 
-脚本会在结束时执行自动验收，典型失败条件：
+脚本会在结束时生成纯文本证据，供 `eval_runner.py` 和 LLM Judge 使用：
 
-- 未产生 `tool_call`
-- 未产生有效 mutation
-- before/after 结构体无变化
-- 运行中断或异常
+- `run_trace.md`
+  - 会话状态
+  - 最近事件
+  - 有效 tool 结果
+  - IDB 备份与快照路径
+- `evidence.md`
+  - Agent 最终输出
+  - 关键函数 before/after 反编译对比
+  - 类型恢复或逻辑分析是否真正进入伪代码
 
-这能避免“只分析不落地”的空跑结果。
+对 `struct_recovery`，评测重点不再是结构体 diff，而是 after 反编译是否真的收敛到更具体的类型与成员访问。
 
 ---
 
@@ -709,6 +712,78 @@ npm run dev -- --host 0.0.0.0 --port 5173
 - 输入输出以纯文本为主，不依赖 pydantic/json 强结构输出
 - 结构体恢复仅使用 `create_structure` 做落地建模
 - IDAPython 兼容目标固定为 IDA Pro 9.3
+
+---
+
+## 20. 整系统评测
+
+整系统评测统一入口：
+
+- `src/entrypoints/eval_runner.py`
+- `src/entrypoints/dev_run_watch.py`
+- `src/evaluation/ground_truth.py`
+- `src/evaluation/cases.py`
+
+常用命令：
+
+```bash
+cd /mnt/d/reverse/agentic_ida_pro
+export PYTHONPATH=src
+
+# preflight
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --suite preflight
+
+# core
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --suite core
+
+# 单 case
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --case struct_c_alias_mesh
+
+# 后台启动 + 查询
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --suite core --background
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --status logs/eval_runs/<run_id>
+```
+
+主要产物目录：
+
+- `logs/eval_runs/<run_id>/status.md`
+- `logs/eval_runs/<run_id>/<case_id>/run_trace.md`
+- `logs/eval_runs/<run_id>/<case_id>/evidence.md`
+- `logs/eval_runs/<run_id>/<case_id>/verdict.md`
+
+运行控制文件会放到隐藏目录：
+
+- `logs/eval_runs/<run_id>/.eval_state/`
+
+---
+
+## 21. 项目级 Skills
+
+项目 skills 分为两类：
+
+### 系统知识类（逆向分析运行时加载）
+
+维护在 `src/skills/`，通过软链接暴露到 `.agents/skills/`：
+
+- `function_analysis` — 函数分析
+- `string_decrypt` — 字符串解密
+- `struct_recovery` — 结构体恢复
+
+### 开发调试类（给 coding agent 开发/测试/评测用）
+
+维护在 `dev_skills/`，目录内直接使用 `SKILL.md`，并通过软链接同步到 `.claude/skills/` 与 `.codex/skills/`：
+
+- `run-full-system-eval` — 整系统评测编排
+- `live-trace-triage` — 运行中排障
+- `judge-reverse-quality` — 评判恢复质量
+- `author-regression-case` — 沉淀回归 case
+
+刷新链接：
+
+```bash
+cd /mnt/d/reverse/agentic_ida_pro
+bash scripts/link_project_skills.sh
+```
 
 ---
 

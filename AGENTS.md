@@ -156,3 +156,42 @@ PY
 
 - 开发前生成的 plan, 开发文档 保存到 reference/docs 目录下, 不要存放到根路径
 - 分析报告、文档存放 reference/docs 
+
+
+## 整系统评测与 Skills
+
+- 整系统评测入口：`src/entrypoints/eval_runner.py`（单 case runner，不含 suite 循环）
+- 运行观测入口：`src/entrypoints/dev_run_watch.py`
+- 定量评估入口：`src/evaluation/ground_truth.py`
+- case 注册位置：`src/evaluation/cases.py`
+
+eval_runner.py 只提供单 case 执行原语，多 case 编排交给 coding agent 的 skill prompt 控制：
+```bash
+# 发现 case
+eval_runner.py --list-suites / --list-cases / --case-info <case_id>
+# 执行单 case
+eval_runner.py --case <case_id>
+# 输出: CASE_DONE case_id=xxx verdict=xxx run_exit_code=xxx ...
+```
+
+### Skills 分类
+
+项目 skills 分为两类：
+
+**系统知识类**（逆向分析系统运行时加载）— 维护在 `src/skills/`，链接到 `.agents/skills/`：
+- `function_analysis` — 函数分析
+- `string_decrypt` — 字符串解密
+- `struct_recovery` — 结构体恢复
+
+**开发调试类**（给 coding agent 开发/测试/评测用）— 维护在 `dev_skills/`，目录内直接使用 `SKILL.md`，并通过软链接同步到 `.claude/skills/` 与 `.codex/skills/`：
+- `run-full-system-eval` — 整系统评测编排
+- `live-trace-triage` — 运行中排障
+- `judge-reverse-quality` — 评判恢复质量
+- `author-regression-case` — 沉淀回归 case
+
+刷新链接：
+
+```bash
+cd /mnt/d/reverse/agentic_ida_pro
+bash scripts/link_project_skills.sh
+```
