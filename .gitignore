@@ -51,3 +51,6 @@ test_binaries/
 
 reference/
 docs/
+
+# Local ad-hoc doc sync notes should stay out of commits
+reference/docs/*_doc_sync.md
