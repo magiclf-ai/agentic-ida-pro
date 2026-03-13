@@ -348,8 +348,13 @@ PYTHONPATH=src .venv/bin/python reverse_agent.py \
   2. 攻击面识别（搜索外部接口）
   3. 优先级排序（基于调用频率、字符串、导入符号）
   4. 深度分析（spawn subagent 批量摘要）
-  5. 综合输出（`submit_reverse_analysis_output`）
+  5. 综合阶段（`expand_call_path` 收敛关键调用链与模块关系）
+  6. 提交阶段（`submit_reverse_analysis_output`）
 - **完成标准**：函数列表摘要、攻击面列表、外部交互文档、不超过 20 个关键函数详细摘要
+- **提交纪律**：
+  - 进入综合阶段后，目标是整理已有证据并完成最终提交，不再为次要补证无限扩张搜索面
+  - 如果任务板只剩综合/提交任务，或连续一轮没有新增关键证据，应优先提交阶段性最终结果
+  - 允许带着明确缺口说明提交，不要求“完全覆盖后再 submit”
 - **适用场景**：初次接触未知二进制、快速功能定位、全局威胁评估
 
 #### Profile 架构统一说明
@@ -381,9 +386,9 @@ bash src/entrypoints/run_ida_service.sh
 职责：
 
 - 执行完整 Agent 循环
-- 运行前备份 IDB（`/db/backup`）
-- 运行前后抓取结构体快照并做 diff
-- 输出 acceptance 报告与结构体定义产物
+- 汇总运行证据并输出 `run_trace.md`、`evidence.md`
+- 在评测模式下接收 case 级上下文并注入主请求
+- 输出 profile 对应的最终文本结果与报告产物
 
 关键参数：
 
@@ -394,6 +399,9 @@ bash src/entrypoints/run_ida_service.sh
 - `--agent-core`：兼容参数，当前统一走通用 runtime
 - `--idapython-kb-dir`：IDAPython 自修复知识库（可选）
 - `--report-dir`：报告目录（默认 `logs/agent_reports`）
+- `--case-id`：评测 case 标识（可选）
+- `--case-spec-path`：评测 case 说明 markdown 路径（可选）
+- `--evidence-function`：优先补证的关键函数名，可重复传入（可选）
 
 ### 9.2 `reverse_agent.py`（根目录入口）
 
@@ -419,6 +427,9 @@ bash src/entrypoints/run_ida_service.sh
 - `--request`：逆向任务描述（必填）
 - `--ida-host/--ida-port`：service 绑定地址
 - `--no-save-on-exit`：退出时关闭数据库不保存
+- `--case-id`：把评测 case 标识透传给 runtime，便于 run_trace / evidence 对齐
+- `--case-spec-path`：把 case 规范文本路径透传给 runtime，收紧目标与验收边界
+- `--evidence-function`：指定优先反编译/补证的函数名，减少短预算下的上下文漂移
 
 ### 9.4 `src/entrypoints/run_ida_service.sh`（纯 Linux 方案）
 
@@ -586,7 +597,13 @@ logs/agent_sessions/agent_observability.sqlite3
 - turns
 - messages
 - turn_tools
+- executed_tool_calls
 - session_events
+
+说明：
+
+- `turns` 会记录 `agent_id`、`agent_name`、`parent_agent_id`，主 Agent 与 subagent trace 会汇总到同一个 session
+- `session_events` 用于 watch / triage，`executed_tool_calls` 用于区分“本轮可见工具”和“实际执行的 tool call”
 
 ---
 
@@ -622,7 +639,22 @@ logs/agent_sessions/agent_observability.sqlite3
 - 后端：`http://127.0.0.1:8765`
 
 前端目录：`frontend/observability`  
-后端入口：`src/entrypoints/logs.py`
+启动入口：`src/entrypoints/observability_stack.py`  
+API 入口：`src/entrypoints/observability_api.py`
+
+常用 observability API：
+
+- `GET /api/sessions`
+- `GET /api/turns?session_id=<session_id>`
+- `GET /api/messages?session_id=<session_id>`
+- `GET /api/tools?session_id=<session_id>` 或 `GET /api/executed_tool_calls?session_id=<session_id>`
+- `GET /api/events?session_id=<session_id>&limit=20`
+- `GET /api/sessions/<session_id>/summary`
+
+其中：
+
+- `/api/sessions/<session_id>/summary` 会返回 run 状态、最近进展时间、最新 turn、最新 tool batch、mutation 统计与 stalled 判断
+- `/api/events` 与 `turns.parent_agent_id` 一起使用时，可以直接追踪 subagent 的完整链路
 
 ---
 
@@ -730,19 +762,24 @@ npm run dev -- --host 0.0.0.0 --port 5173
 cd /mnt/d/reverse/agentic_ida_pro
 export PYTHONPATH=src
 
-# preflight
-/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --suite preflight
+# 发现 suites / cases
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --list-suites
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --list-cases
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --case-info struct_c_alias_mesh
 
-# core
-/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --suite core
-
-# 单 case
+# 执行单 case
 /mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --case struct_c_alias_mesh
 
-# 后台启动 + 查询
-/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --suite core --background
+# 查询状态 / 停止 / 重新 judge
 /mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --status logs/eval_runs/<run_id>
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --stop logs/eval_runs/<run_id>
+/mnt/d/reverse/agentic_ida_pro/.venv/bin/python -u src/entrypoints/eval_runner.py --judge-only logs/eval_runs/<run_id>
 ```
+
+说明：
+
+- `eval_runner.py` 只负责单 case 执行原语；多 case / suite 编排应由 coding agent 或 dev skill 控制，而不是在 runner 内部写循环
+- 评测执行时会把 `case_id`、`case_spec_path`、`evidence_function` 透传给 runtime，收紧短预算 case 的上下文与补证目标
 
 主要产物目录：
 
