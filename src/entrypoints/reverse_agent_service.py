@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
 import os
 import re
 import socket
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -95,6 +97,13 @@ LIKELY_TEXT_SUFFIXES = {
 }
 
 DEFAULT_BATCH_PATTERNS = ["*"]
+DEFAULT_OBSERVABILITY_RUNTIME_DIR = PROJECT_ROOT / "logs" / "observability_runtime"
+DEFAULT_OBSERVABILITY_SCRIPT = PROJECT_ROOT / "start_observability.sh"
+DEFAULT_OBSERVABILITY_API_HOST = "0.0.0.0"
+DEFAULT_OBSERVABILITY_API_PORT = 8765
+DEFAULT_OBSERVABILITY_UI_HOST = "0.0.0.0"
+DEFAULT_OBSERVABILITY_UI_PORT = 5173
+SKIP_OBSERVABILITY_BOOT_ENV = "AGENTIC_SKIP_OBSERVABILITY_BOOT"
 
 
 def _service_access_host(bind_host: str) -> str:
@@ -116,6 +125,38 @@ def _build_env() -> Dict[str, str]:
     return env
 
 
+def _read_text(path: Path, default: str = "") -> str:
+    if not path.exists():
+        return default
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _tail_text(path: Path, max_lines: int = 40) -> str:
+    lines = _read_text(path, "").splitlines()
+    if not lines:
+        return ""
+    return "\n".join(lines[-max(1, int(max_lines)):])
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _terminate_process(proc: Optional[subprocess.Popen], name: str, timeout_sec: int = 15) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -127,6 +168,233 @@ def _terminate_process(proc: Optional[subprocess.Popen], name: str, timeout_sec:
         print(f"[WARN] terminate timeout for {name}, killing pid={proc.pid}")
         proc.kill()
         proc.wait(timeout=5)
+
+
+def _terminate_pid(pid: int, name: str, timeout_sec: int = 15) -> None:
+    if int(pid or 0) <= 0 or not _process_alive(int(pid)):
+        return
+    print(f"[INFO] stopping {name} pid={int(pid)}")
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.time() + max(1, int(timeout_sec))
+    while time.time() < deadline:
+        if not _process_alive(int(pid)):
+            return
+        time.sleep(0.5)
+    if not _process_alive(int(pid)):
+        return
+    print(f"[WARN] terminate timeout for {name}, killing pid={int(pid)}")
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not _process_alive(int(pid)):
+            return
+        time.sleep(0.2)
+
+
+def _observability_meta_path(runtime_dir: Path) -> Path:
+    return runtime_dir / "stack_meta.json"
+
+
+def _observability_pid_path(runtime_dir: Path) -> Path:
+    return runtime_dir / "stack.pid"
+
+
+def _observability_log_path(runtime_dir: Path) -> Path:
+    return runtime_dir / "stack.log"
+
+
+def _wait_port_released(host: str, port: int, timeout_sec: int = 30) -> None:
+    deadline = time.time() + max(1, int(timeout_sec))
+    while time.time() < deadline:
+        if _can_bind_port(host, int(port)):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"Timed out waiting port release host={host} port={int(port)}")
+
+
+def _stop_managed_observability(runtime_dir: Path) -> None:
+    runtime_dir = runtime_dir.resolve()
+    meta_path = _observability_meta_path(runtime_dir)
+    pid_path = _observability_pid_path(runtime_dir)
+    meta = _read_json(meta_path, {})
+    stack_pid = int(meta.get("stack_pid", 0) or 0)
+    if stack_pid <= 0:
+        try:
+            stack_pid = int(_read_text(pid_path, "0").strip() or 0)
+        except Exception:
+            stack_pid = 0
+    backend_pid = int(meta.get("backend_pid", 0) or 0)
+    frontend_pid = int(meta.get("frontend_pid", 0) or 0)
+    if stack_pid <= 0 and backend_pid <= 0 and frontend_pid <= 0:
+        for stale_path in (pid_path, meta_path):
+            try:
+                if stale_path.exists():
+                    stale_path.unlink()
+            except Exception:
+                pass
+        return
+
+    print("[INFO] restarting managed observability stack")
+    _terminate_pid(stack_pid, "observability_stack")
+    for child_pid, label in ((backend_pid, "observability_backend"), (frontend_pid, "observability_frontend")):
+        if child_pid > 0:
+            _terminate_pid(child_pid, label)
+
+    api_host = _service_access_host(str(meta.get("api_host", DEFAULT_OBSERVABILITY_API_HOST) or DEFAULT_OBSERVABILITY_API_HOST))
+    ui_host = _service_access_host(str(meta.get("ui_host", DEFAULT_OBSERVABILITY_UI_HOST) or DEFAULT_OBSERVABILITY_UI_HOST))
+    for host, port in (
+        (api_host, int(meta.get("api_port", DEFAULT_OBSERVABILITY_API_PORT) or DEFAULT_OBSERVABILITY_API_PORT)),
+        (ui_host, int(meta.get("ui_port", DEFAULT_OBSERVABILITY_UI_PORT) or DEFAULT_OBSERVABILITY_UI_PORT)),
+    ):
+        _wait_port_released(host, port, timeout_sec=20)
+
+    for stale_path in (pid_path, meta_path):
+        try:
+            if stale_path.exists():
+                stale_path.unlink()
+        except Exception:
+            pass
+
+
+def _observability_api_url(host: str = DEFAULT_OBSERVABILITY_API_HOST, port: int = DEFAULT_OBSERVABILITY_API_PORT) -> str:
+    return f"http://{_service_access_host(host)}:{int(port)}/api/health"
+
+
+def _observability_ui_url(host: str = DEFAULT_OBSERVABILITY_UI_HOST, port: int = DEFAULT_OBSERVABILITY_UI_PORT) -> str:
+    return f"http://{_service_access_host(host)}:{int(port)}"
+
+
+def _wait_http_ready(
+    *,
+    url: str,
+    label: str,
+    proc: subprocess.Popen,
+    log_path: Path,
+    timeout_sec: int,
+    expect_health_ok: bool,
+) -> None:
+    deadline = time.time() + max(1, int(timeout_sec))
+    last_error = ""
+    session = requests.Session()
+    session.trust_env = False
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            log_tail = _tail_text(log_path)
+            raise RuntimeError(
+                f"{label} exited early rc={int(proc.returncode)}"
+                + (f"\n[observability log tail]\n{log_tail}" if log_tail else "")
+            )
+        try:
+            response = session.get(url, timeout=3)
+            if expect_health_ok:
+                payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                if int(response.status_code) == 200 and (
+                    str(payload.get("status", "")) == "ok" or bool(payload.get("ok", False))
+                ):
+                    return
+                last_error = f"http={int(response.status_code)} payload={payload}"
+            else:
+                if 200 <= int(response.status_code) < 500:
+                    return
+                last_error = f"http={int(response.status_code)}"
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(1)
+    log_tail = _tail_text(log_path)
+    raise TimeoutError(
+        f"Timed out waiting {label}: {last_error}"
+        + (f"\n[observability log tail]\n{log_tail}" if log_tail else "")
+    )
+
+
+def _try_open_browser(url: str) -> bool:
+    commands: List[List[str]] = []
+    if shutil.which("wslview"):
+        commands.append(["wslview", url])
+    if shutil.which("xdg-open"):
+        commands.append(["xdg-open", url])
+    if shutil.which("gio"):
+        commands.append(["gio", "open", url])
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if int(proc.returncode) == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _should_skip_observability_bootstrap() -> bool:
+    value = str(os.getenv(SKIP_OBSERVABILITY_BOOT_ENV, "")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _ensure_observability_ready() -> None:
+    if _should_skip_observability_bootstrap():
+        print(f"[INFO] observability bootstrap skipped by env {SKIP_OBSERVABILITY_BOOT_ENV}=1")
+        return
+
+    runtime_dir = DEFAULT_OBSERVABILITY_RUNTIME_DIR.resolve()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    _stop_managed_observability(runtime_dir)
+
+    cmd = [
+        "bash",
+        str(DEFAULT_OBSERVABILITY_SCRIPT),
+        "--no-reload",
+        "--api-host",
+        DEFAULT_OBSERVABILITY_API_HOST,
+        "--api-port",
+        str(int(DEFAULT_OBSERVABILITY_API_PORT)),
+        "--ui-host",
+        DEFAULT_OBSERVABILITY_UI_HOST,
+        "--ui-port",
+        str(int(DEFAULT_OBSERVABILITY_UI_PORT)),
+        "--runtime-dir",
+        str(runtime_dir),
+    ]
+    print(f"[INFO] starting observability stack: {' '.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        env=_build_env(),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    )
+    log_path = _observability_log_path(runtime_dir)
+    try:
+        _wait_http_ready(
+            url=_observability_api_url(),
+            label="observability api",
+            proc=proc,
+            log_path=log_path,
+            timeout_sec=90,
+            expect_health_ok=True,
+        )
+        _wait_http_ready(
+            url=_observability_ui_url(),
+            label="observability ui",
+            proc=proc,
+            log_path=log_path,
+            timeout_sec=120,
+            expect_health_ok=False,
+        )
+    except Exception:
+        _stop_managed_observability(runtime_dir)
+        raise
+    ui_url = _observability_ui_url()
+    if _try_open_browser(ui_url):
+        print(f"[INFO] observability UI opened: {ui_url}")
+    else:
+        print(f"[INFO] observability UI ready, open manually: {ui_url}")
 
 
 def _wait_service_ready(
@@ -588,6 +856,7 @@ async def _run_batch_worker(
     reserved_ports: set[int],
 ) -> None:
     env = _build_env()
+    env[SKIP_OBSERVABILITY_BOOT_ENV] = "1"
 
     while True:
         item = await queue.get()
@@ -745,6 +1014,7 @@ def main() -> int:
                 f"({single_suffix}). Use .i64/.idb/.i32 main database file instead: {input_path}"
             )
             return 2
+        _ensure_observability_ready()
         return _run_single_target(args=args, input_path=input_path, ida_port=int(args.ida_port), report_dir="")
 
     patterns = [str(item).strip() for item in (args.file_pattern or []) if str(item).strip()] or DEFAULT_BATCH_PATTERNS
@@ -765,6 +1035,7 @@ def main() -> int:
         print(f"[BATCH][TARGET] {idx}: {path}")
 
     try:
+        _ensure_observability_ready()
         return int(asyncio.run(_run_batch_mode(args, targets)))
     except KeyboardInterrupt:
         print("[WARN] batch interrupted by keyboard_interrupt")

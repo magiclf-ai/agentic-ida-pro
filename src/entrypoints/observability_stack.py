@@ -20,10 +20,12 @@
 """
 
 import argparse
+import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -33,35 +35,191 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend" / "observability"
 DEFAULT_API_HOST = "0.0.0.0"
 DEFAULT_API_PORT = 8765
 DEFAULT_UI_PORT = 5173
+DEFAULT_RUNTIME_DIR = PROJECT_ROOT / "logs" / "observability_runtime"
+
+
+def _utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class _TeeStream:
+    def __init__(self, primary, secondary):
+        self.primary = primary
+        self.secondary = secondary
+
+    def write(self, data):
+        text = str(data or "")
+        if not text:
+            return 0
+        self.primary.write(text)
+        self.secondary.write(text)
+        return len(text)
+
+    def flush(self):
+        self.primary.flush()
+        self.secondary.flush()
+
+    def isatty(self):
+        return bool(getattr(self.primary, "isatty", lambda: False)())
+
+    @property
+    def encoding(self):
+        return getattr(self.primary, "encoding", "utf-8")
+
+
+_RUNTIME_LOG_HANDLE = None
+
+
+def _setup_runtime_logging(runtime_dir: Path) -> Path:
+    global _RUNTIME_LOG_HANDLE
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    log_path = runtime_dir / "stack.log"
+    _RUNTIME_LOG_HANDLE = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = _TeeStream(sys.__stdout__, _RUNTIME_LOG_HANDLE)
+    sys.stderr = _TeeStream(sys.__stderr__, _RUNTIME_LOG_HANDLE)
+    print(f"[Observability] log file: {log_path}")
+    return log_path
+
+
+def _close_runtime_logging() -> None:
+    global _RUNTIME_LOG_HANDLE
+    handle = _RUNTIME_LOG_HANDLE
+    _RUNTIME_LOG_HANDLE = None
+    if handle is None:
+        return
+    try:
+        handle.flush()
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def _service_access_host(bind_host: str) -> str:
+    host = str(bind_host or "").strip()
+    if host in {"0.0.0.0", "::", "[::]"}:
+        return "127.0.0.1"
+    return host or "127.0.0.1"
+
+
+def _safe_pid(proc: subprocess.Popen | None) -> int:
+    if proc is None:
+        return 0
+    try:
+        return int(proc.pid or 0)
+    except Exception:
+        return 0
+
+
+def _terminate_managed_process(proc: subprocess.Popen, name: str, timeout_sec: int = 5) -> None:
+    if proc.poll() is not None:
+        return
+    print(f"  停止 {name} (PID: {proc.pid})")
+    try:
+        os.killpg(int(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception:
+        proc.terminate()
+    try:
+        proc.wait(timeout=max(1, int(timeout_sec)))
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(int(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except Exception:
+        proc.kill()
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
 
 
 class ProcessManager:
     """管理前后端进程"""
-    
-    def __init__(self):
+
+    def __init__(self, *, runtime_dir: Path, api_host: str, api_port: int, ui_host: str, ui_port: int, log_path: Path):
         self.processes = []
+        self.process_map = {}
         self._shutting_down = False
-    
+        self.runtime_dir = runtime_dir
+        self.api_host = str(api_host or "").strip() or DEFAULT_API_HOST
+        self.api_port = int(api_port)
+        self.ui_host = str(ui_host or "").strip() or "0.0.0.0"
+        self.ui_port = int(ui_port)
+        self.log_path = log_path
+        self.started_at = _utc_now_iso()
+        self._write_runtime_state(status="starting")
+
     def add(self, proc: subprocess.Popen, name: str):
         self.processes.append((proc, name))
-    
-    def shutdown(self, signum=None, frame=None):
+        self.process_map[str(name or "").lower()] = proc
+        self._write_runtime_state(status="starting")
+
+    def _runtime_meta_path(self) -> Path:
+        return self.runtime_dir / "stack_meta.json"
+
+    def _runtime_pid_path(self) -> Path:
+        return self.runtime_dir / "stack.pid"
+
+    def _runtime_payload(self, status: str) -> dict:
+        backend_proc = self.process_map.get("backend")
+        frontend_proc = self.process_map.get("frontend")
+        return {
+            "status": str(status or "").strip() or "starting",
+            "started_at": self.started_at,
+            "updated_at": _utc_now_iso(),
+            "stack_pid": int(os.getpid()),
+            "api_host": self.api_host,
+            "api_port": int(self.api_port),
+            "api_url": f"http://{_service_access_host(self.api_host)}:{int(self.api_port)}",
+            "ui_host": self.ui_host,
+            "ui_port": int(self.ui_port),
+            "ui_url": f"http://{_service_access_host(self.ui_host)}:{int(self.ui_port)}",
+            "backend_pid": _safe_pid(backend_proc),
+            "frontend_pid": _safe_pid(frontend_proc),
+            "log_path": str(self.log_path),
+        }
+
+    def _write_runtime_state(self, status: str) -> None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        payload = self._runtime_payload(status=status)
+        self._runtime_meta_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._runtime_pid_path().write_text(str(int(os.getpid())), encoding="utf-8")
+
+    def _clear_runtime_state(self) -> None:
+        for path in (self._runtime_pid_path(), self._runtime_meta_path()):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as e:
+                print(f"[Observability] 清理 runtime 文件失败: {path} ({e})")
+
+    def mark_ready(self):
+        self._write_runtime_state(status="running")
+
+    def stop_all(self):
         if self._shutting_down:
             return
         self._shutting_down = True
-        
+
+        self._write_runtime_state(status="stopping")
         print("\n\n[Observability] 正在停止服务...")
         for proc, name in self.processes:
             if proc.poll() is None:
-                print(f"  停止 {name} (PID: {proc.pid})")
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-        
+                _terminate_managed_process(proc, name)
+
         print("[Observability] 所有服务已停止")
-        sys.exit(0)
+        self._clear_runtime_state()
+
+    def shutdown(self, signum=None, frame=None):
+        self.stop_all()
+        raise SystemExit(0)
 
 
 def check_node_modules() -> bool:
@@ -109,6 +267,7 @@ def start_backend(host: str, port: int, db_path: str = None, reload: bool = True
     proc = subprocess.Popen(
         cmd,
         env=env,
+        start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -137,6 +296,7 @@ def start_frontend(host: str, port: int, api_host: str, api_port: int, reload: b
         cmd,
         cwd=FRONTEND_DIR,
         env=env,
+        start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -219,7 +379,7 @@ def get_default_api_host():
 
 def main():
     default_host = get_default_api_host()
-    
+
     parser = argparse.ArgumentParser(
         description="启动可观测性系统（前端 + 后端，默认启用热更新）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -261,13 +421,24 @@ def main():
                         help="跳过前端依赖检查")
     parser.add_argument("--no-reload", action="store_true",
                         help="禁用热重载（默认启用）")
+    parser.add_argument("--runtime-dir", type=str, default=str(DEFAULT_RUNTIME_DIR),
+                        help="受管 runtime 元信息目录")
 
     args = parser.parse_args()
-    
-    manager = ProcessManager()
+
+    runtime_dir = Path(str(args.runtime_dir or DEFAULT_RUNTIME_DIR)).resolve()
+    log_path = _setup_runtime_logging(runtime_dir)
+    manager = ProcessManager(
+        runtime_dir=runtime_dir,
+        api_host=str(args.api_host),
+        api_port=int(args.api_port),
+        ui_host=str(args.ui_host),
+        ui_port=int(args.ui_port),
+        log_path=log_path,
+    )
     signal.signal(signal.SIGINT, manager.shutdown)
     signal.signal(signal.SIGTERM, manager.shutdown)
-    
+
     # 检查虚拟环境
     if not str(sys.executable).endswith(".venv/bin/python"):
         venv_python = PROJECT_ROOT / ".venv" / "bin" / "python"
@@ -287,12 +458,17 @@ def main():
             print(f"[Backend] 启动 API 服务 ({args.api_host}:{args.api_port}) [{reload_status}]...")
             backend_proc = start_backend(args.api_host, args.api_port, args.db_path, reload=reload)
             manager.add(backend_proc, "Backend")
+            threading.Thread(
+                target=stream_output,
+                args=(backend_proc, "Backend", "green"),
+                daemon=True,
+            ).start()
 
             # 等待后端启动（如果是 0.0.0.0，用 127.0.0.1 检查）
             check_host = "127.0.0.1" if args.api_host == "0.0.0.0" else args.api_host
             if not wait_for_service(args.api_port, timeout=30, host=check_host, name="Backend"):
                 print("[Backend] 启动超时，请检查日志")
-                manager.shutdown()
+                manager.stop_all()
                 return 1
             print(f"[Backend] 服务已启动 ✅\n")
 
@@ -307,15 +483,22 @@ def main():
             print(f"[Frontend] 启动 UI 服务 ({args.ui_host}:{args.ui_port}) [{reload_status}]...")
             frontend_proc = start_frontend(args.ui_host, args.ui_port, args.api_host, args.api_port, reload=reload)
             manager.add(frontend_proc, "Frontend")
+            threading.Thread(
+                target=stream_output,
+                args=(frontend_proc, "Frontend", "blue"),
+                daemon=True,
+            ).start()
 
             # 等待前端启动
             check_host = "127.0.0.1" if args.ui_host == "0.0.0.0" else args.ui_host
             if not wait_for_service(args.ui_port, timeout=60, host=check_host, name="Frontend"):
                 print("[Frontend] 启动超时，请检查日志")
-                manager.shutdown()
+                manager.stop_all()
                 return 1
             print(f"[Frontend] 服务已启动 ✅\n")
-        
+
+        manager.mark_ready()
+
         # 打印横幅
         if args.backend_only:
             print(f"\n[Backend] 单独运行模式")
@@ -326,31 +509,21 @@ def main():
         else:
             print_banner(api_access_host, args.api_port, args.ui_port)
         
-        # 流式输出日志
-        import threading
-        threads = []
-        
-        for proc, name in manager.processes:
-            color = "green" if name == "Backend" else "blue"
-            t = threading.Thread(
-                target=stream_output,
-                args=(proc, name, color),
-                daemon=True,
-            )
-            t.start()
-            threads.append(t)
-        
         # 等待所有进程结束
         for proc, name in manager.processes:
             proc.wait()
-        
+
     except KeyboardInterrupt:
-        manager.shutdown()
+        manager.stop_all()
+        return 130
     except Exception as e:
         print(f"\n[Error] {e}")
-        manager.shutdown()
+        manager.stop_all()
         return 1
-    
+    finally:
+        manager._clear_runtime_state()
+        _close_runtime_logging()
+
     return 0
 
 

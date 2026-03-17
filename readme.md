@@ -249,6 +249,8 @@ PYTHONPATH=src .venv/bin/python reverse_agent.py \
 
 该入口会：
 
+- 同步 fresh restart 并拉起 observability stack（前端 `5173` / 后端 `8765`）
+- 等待 observability API/UI 健康；可自动打开 UI，失败时会打印 `http://127.0.0.1:5173`
 - 子进程启动 `ida_service.daemon`
 - 调用 `/db/open` 打开目标二进制或 IDB
 - 启动并等待 `reverse_expert.py`
@@ -277,6 +279,7 @@ PYTHONPATH=src .venv/bin/python reverse_agent.py \
 
 - 建议统一使用 `--input-path`，当该路径是目录时自动进入批量模式
 - `--input-dir` 仍可用，但仅作为 `--input-path` 的兼容别名
+- 批量模式下 observability 只在父流程启动一次，worker 子进程不会重复重启 UI
 - 批量模式下端口为动态分配（从 `--ida-port` 起寻找可用端口），避免并发冲突
 - 建议端口区间预留充足，避免与本机其他服务冲突
 
@@ -605,6 +608,23 @@ logs/agent_sessions/agent_observability.sqlite3
 - `turns` 会记录 `agent_id`、`agent_name`、`parent_agent_id`，主 Agent 与 subagent trace 会汇总到同一个 session
 - `session_events` 用于 watch / triage，`executed_tool_calls` 用于区分“本轮可见工具”和“实际执行的 tool call”
 
+### 13.3 可观测性运行时目录
+
+```text
+logs/observability_runtime/
+```
+
+典型文件：
+
+- `stack.pid`
+- `stack_meta.json`
+- `stack.log`
+
+说明：
+
+- `reverse_agent.py` 默认会先回收旧的受管 observability 实例，再 fresh 启动一份新的 stack
+- 运行时目录只记录受管 observability supervisor 及其前后端子进程，不参与评测产物
+
 ---
 
 ## 14. 证据采集机制（reverse_expert）
@@ -625,9 +645,11 @@ logs/agent_sessions/agent_observability.sqlite3
 
 ---
 
-## 15. 可观测性 UI（可选）
+## 15. 可观测性 UI
 
-一键启动前后端：
+默认情况下，`reverse_agent.py` 会在启动逆向主流程前自动拉起 observability stack，无需手工先执行 UI 启动脚本。
+
+如需单独调试前后端，仍可手工启动：
 
 ```bash
 ./start_observability.sh
@@ -637,6 +659,12 @@ logs/agent_sessions/agent_observability.sqlite3
 
 - 前端：`http://127.0.0.1:5173`
 - 后端：`http://127.0.0.1:8765`
+
+运行时元信息目录：
+
+- `logs/observability_runtime/stack.pid`
+- `logs/observability_runtime/stack_meta.json`
+- `logs/observability_runtime/stack.log`
 
 前端目录：`frontend/observability`  
 启动入口：`src/entrypoints/observability_stack.py`  
@@ -734,6 +762,13 @@ curl -fsS http://127.0.0.1:5000/db/info
 cd frontend/observability
 npm install
 npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+如果是通过 `reverse_agent.py` 自动启动失败，可优先查看：
+
+```bash
+tail -n 120 logs/observability_runtime/stack.log
+cat logs/observability_runtime/stack_meta.json
 ```
 
 ---
